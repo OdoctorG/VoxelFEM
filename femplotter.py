@@ -5,6 +5,23 @@ import matplotlib.cm as cm
 from matplotlib.colors import Normalize
 from femsolver import nodes_to_coord, coord_to_nodes, shape_function
 
+def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
+            flip_y: bool = False, z_order=2) -> plt.Figure:
+    if new_figure:
+        fig = plt.figure()
+    for i in range(voxels.shape[0]):
+        for j in range(voxels.shape[1]):
+            if voxels[i, j] == 1:
+                for k in [[0,1,0,0],[0,0,0,1],[1,1,0,1],[0,1,1,1]]:
+                    if flip_y:
+                        plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [-i+k[2]+offset[1], -i+k[3]+offset[1]], color="black", zorder=z_order)
+                    else:
+                        plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [i+k[2]+offset[1], i+k[3]+offset[1]], color="black", zorder=z_order)
+    if new_figure:
+        return fig
+    else:
+        return None
+
 def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Figure:
     """
     Plot a vector at each node in the mesh, given the values and the voxel representation of the geometry.
@@ -25,6 +42,7 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Fi
     
     fig = plt.figure()
     plt.imshow(voxels, cmap="binary", alpha=0.5)
+    plot_mesh(voxels, offset=[-0.5, -0.5])
     print(vals.shape)
     norm = Normalize(vals.min(), vals.max())
     for i in range(len(vals)//2):
@@ -34,7 +52,8 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Fi
         color = cm.viridis(norm(vector_length))
 
         if vector_length > 0:
-            plt.arrow(coord[1]-0.5, coord[0]-0.5, scale*vals[i*2][0], scale*vals[i*2+1][0], color=color, head_width=vector_length*scale*0.5+0.01)
+            plt.arrow(coord[1]-0.5, coord[0]-0.5, scale*vals[i*2][0], scale*vals[i*2+1][0], color=color, head_width=np.log(vector_length*scale*0.5+1)+0.01,
+                    zorder=3)
     
     return fig
 def node_value_plot(vals: np.ndarray, voxels: np.ndarray, scale=1) -> plt.Figure:
@@ -79,4 +98,5 @@ def node_value_plot(vals: np.ndarray, voxels: np.ndarray, scale=1) -> plt.Figure
                 # Plot the result
                 plt.pcolormesh(X*0.5+j, Y*(-0.5)-i, result, cmap='viridis', norm=norm)
     plt.colorbar()
+    plot_mesh(voxels, offset=[-0.5, -0.5], flip_y=True)
     return fig
