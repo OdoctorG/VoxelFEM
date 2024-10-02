@@ -1,7 +1,5 @@
 import math
 import numpy as np
-import matplotlib.pyplot as plt
-
 
 """ 
 Voxel 2D FEM Solver 
@@ -445,42 +443,9 @@ def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
     
     return new_voxels
 
-def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> None:
-    plt.figure()
-    plt.imshow(voxels, cmap="binary")
-    print(vals.shape)
-    for i in range(len(vals)//2):
-
-        coord = nodes_to_coord(i, voxels.shape[1])
-        plt.arrow(coord[1]-0.5, coord[0]-0.5, scale*vals[i*2][0], scale*vals[i*2+1][0], color="red")
-
-def node_value_plot(vals: np.ndarray, voxels: np.ndarray, scale=1) -> None:
-    plt.figure()
-    norm = plt.Normalize(min(vals), max(vals))
-    # Vectorize the function
-    vectorized_compute_vector = np.vectorize(shape_function, signature='(),()->(n)')
-    print(vals.shape)
-    for i in range(voxels.shape[0]):
-        for j in range(voxels.shape[1]):
-            if (voxels[i, j] == 1):
-                coord = coord_to_nodes(i, j, voxels.shape[1])
-                z = [vals[coord[0]], vals[coord[1]], vals[coord[2]], vals[coord[3]]]
-                x = np.linspace(-1, 1, 100)
-                y = np.linspace(-1, 1, 100)
-                X, Y = np.meshgrid(x, y)
-
-
-                # Compute vectors for all points in the meshgrid
-                vectors = vectorized_compute_vector(X, Y)
-
-                # Compute the interpolated value
-                result = np.dot(vectors, z)
-
-                # Plot the result
-                plt.pcolormesh(X*0.5+j, Y*0.5+i, result, cmap='viridis', alpha=0.5, norm=norm)
-    plt.colorbar()
-
 def test():
+    import matplotlib.pyplot as plt
+    import femplotter
     # Simple test case for the voxel fem solver
 
     E = 200e9  # Young's modulus (Pa)
@@ -490,34 +455,37 @@ def test():
 
     Ke = element_stiffness_matrix(E, nu, L, t)
 
+    # Define the voxels/mesh
     voxels = np.array([[0,1],
                     [1,1]])
     
     voxels = sub_divide(voxels, 2)
 
+    # Compute the global stiffness matrix
     K = global_stiffness_matrix(Ke, voxels)
-
     n_dofs = K.shape[0]
+
+    # Define the force
     F = np.zeros((n_dofs, 1))
     F = add_force_to_node(3, F, np.array([1, 1]))
 
-    print(K.shape)
-
+    # Solve displacements (and add boundary conditions)
     u = solve(K, F, [20, 21, 22, 23, 24])
-    node_vector_plot(u, voxels)
-    plt.figure()
+
+    # Plot the displacements
+    vector_figure = femplotter.node_vector_plot(u, voxels)
+    vector_figure.suptitle("Displacements")
+
+    # Compute stresses and strains
     eps = get_element_strains(u, voxels, L)
     sigma = get_element_stresses(eps, E, nu)
-    get_node_values(eps, voxels, L)
+    n_eps = get_node_values(eps, voxels, L)
     n_sigma = get_node_values(sigma, voxels, L)
-    moment = n_sigma[:, 2]
-    node_value_plot(moment, voxels)
 
+    # Plot the von_mises stresses
     von_mises = von_mises_stresses_node(n_sigma)
-    node_value_plot(von_mises, voxels)
-    #print(u)
-    #print(eps)
-    #print(sigma)
+    von_mises_figure = femplotter.node_value_plot(von_mises, voxels)
+    von_mises_figure.suptitle("von Mises stresses")
     plt.show()
 
 if __name__ == "__main__":
