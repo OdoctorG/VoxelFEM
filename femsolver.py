@@ -17,6 +17,13 @@ N₃ = (1 - ξ)(1 + η) / 4
 N₄ = (1 + ξ)(1 + η) / 4
 
 """
+
+
+# Number of Gauss points, if set to 1 you get very bad results. 2 and up reccommend
+NGAUSS = 2
+
+
+
 def B_matrix(xi, eta, L):
     """
     Generate the B-matrix for a square element with side length L.
@@ -39,6 +46,31 @@ def shape_function(xi: float, eta: float) -> float:
     N = np.array([(1 - xi)*(1 - eta), (1 + xi)*(1 - eta), (1 - xi)*(1 + eta), (1 + xi)*(1 + eta)])
 
     return N
+
+def gauss_points(N: int) -> tuple[list, list]:
+    """
+    Get the Gauss points and weights for N-point Gaussian quadrature integration.
+    
+    Parameters
+    ----------
+    N : int
+        Number of Gauss points to compute (N = 1, 2, 3, 4)
+        
+    Returns
+    -------
+    tuple[list, list]
+        A tuple with the Gauss points and weights. If N is not in the range 1-4, returns None, None.
+    """
+
+    if N == 1:
+        return ([0], [2])
+    if N == 2:
+        return ([-1/np.sqrt(3), 1/np.sqrt(3)], [1,1])
+    if N == 3:
+        return ([-np.sqrt(3/5), 0, np.sqrt(3/5)], [5/9, 8/9, 5/9])
+    if N == 4:
+        return ([0.339981633, -0.339981633, 0.861136311, -0.861136311], [0.652145, 0.652145, 0.347855, 0.347855])
+    return (None, None)
 
 def element_stiffness_matrix(E: float, nu: float, L, t):
     """
@@ -67,13 +99,14 @@ def element_stiffness_matrix(E: float, nu: float, L, t):
                                     [0, 0, (1-nu)/2]])
     
     # Gauss points and weights
-    gauss_points = [-1/np.sqrt(3), 1/np.sqrt(3)]
-    w = 1
+    gauss_p, w = gauss_points(NGAUSS)
     
     K = np.zeros((8, 8))
-    
-    for xi in gauss_points:
-        for eta in gauss_points:
+
+    xi_idx = 0
+    for xi in gauss_p:
+        eta_idx = 0
+        for eta in gauss_p:
             # Compute B matrix at Gauss point
             B = B_matrix(xi, eta, L)
             
@@ -81,8 +114,9 @@ def element_stiffness_matrix(E: float, nu: float, L, t):
             J = L**2 / 4
             
             # Accumulate contribution to stiffness matrix
-            K += w * w * np.dot(np.dot(B.T, D), B) * J * t
-
+            K += w[xi_idx] * w[eta_idx] * np.dot(np.dot(B.T, D), B) * J * t
+            eta_idx += 1
+        xi_idx += 1
     return K
 
 def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarray:
@@ -107,9 +141,9 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
     W = voxels.shape[1] # Number of columns
 
     # Gauss points and weights
-    gauss_points = [-1/np.sqrt(3), 1/np.sqrt(3)]
-    n_gauss_points = len(gauss_points)
-    w = 1
+    gauss_p, w = gauss_points(NGAUSS)
+    n_gauss_points = len(gauss_p)
+
     strains = np.zeros((voxels.shape[0]*n_gauss_points,voxels.shape[1]*n_gauss_points,3), dtype=object)
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
@@ -125,18 +159,18 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
 
                 # Loop over all Gauss points
                 xi_idx = 0
-                for xi in gauss_points:
+                for xi in gauss_p:
                     eta_idx = 0
-                    for eta in gauss_points:
+                    for eta in gauss_p:
                         # Compute B matrix at Gauss point
                         B = B_matrix(xi, eta, L)
                 
                         # Compute Jacobian determinant
                         J = 0.25
                         # Compute strains at Gauss point
-                        strains[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx][0] += w * w * np.dot(B[0], el_u) * J
-                        strains[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx][1] += w * w * np.dot(B[1], el_u) * J
-                        strains[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx][2] += w * w * np.dot(B[2], el_u) * J
+                        strains[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx][0] += w[xi_idx] * w[eta_idx] * np.dot(B[0], el_u) * J
+                        strains[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx][1] += w[xi_idx] * w[eta_idx] * np.dot(B[1], el_u) * J
+                        strains[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx][2] += w[xi_idx] * w[eta_idx] * np.dot(B[2], el_u) * J
 
                         eta_idx += 1
                     xi_idx += 1
@@ -165,9 +199,9 @@ def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.n
     W = voxels.shape[1] # Number of columns
 
     # Gauss points and weights
-    gauss_points = [-1/np.sqrt(3), 1/np.sqrt(3)]
-    n_gauss_points = len(gauss_points)
-    w = 1
+    gauss_p, w = gauss_points(NGAUSS)
+    n_gauss_points = len(gauss_p)
+
     strains = np.zeros(((voxels.shape[0]+1)*(voxels.shape[1]+1),3))
     avg_count = np.zeros(((voxels.shape[0]+1)*(voxels.shape[1]+1),1), dtype=int)
     W = voxels.shape[1] # Number of columns
@@ -178,9 +212,9 @@ def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.n
                 nodes = coord_to_nodes(i,j, W)
                 # Loop over all Gauss points
                 xi_idx = 0
-                for xi in gauss_points:
+                for xi in gauss_p:
                     eta_idx = 0
-                    for eta in gauss_points:
+                    for eta in gauss_p:
                         elem_strain = element_s[n_gauss_points*i+eta_idx,n_gauss_points*j+xi_idx]
 
                         N = shape_function(xi, eta)
@@ -193,10 +227,6 @@ def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.n
                     xi_idx += 1
     
     return strains
-
-
-
-
 
 def get_element_stresses(element_strains: np.ndarray, E: float, nu: float) -> np.ndarray:
     """
@@ -467,7 +497,7 @@ def test():
 
     # Define the force
     F = np.zeros((n_dofs, 1))
-    F = add_force_to_node(2, F, np.array([1, 1]))
+    F = add_force_to_node(3, F, np.array([0, 0.5]))
 
     # Solve displacements (and add boundary conditions)
     u = solve(K, F, [20, 21, 22, 23, 24])
