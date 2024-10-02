@@ -467,7 +467,7 @@ def test():
 
     # Define the force
     F = np.zeros((n_dofs, 1))
-    F = add_force_to_node(3, F, np.array([1, 1]))
+    F = add_force_to_node(2, F, np.array([1, 1]))
 
     # Solve displacements (and add boundary conditions)
     u = solve(K, F, [20, 21, 22, 23, 24])
@@ -475,6 +475,7 @@ def test():
     # Plot the displacements
     vector_figure = femplotter.node_vector_plot(u, voxels)
     vector_figure.suptitle("Displacements")
+    femplotter.plot_displaced_mesh(u, voxels, new_figure=True)
 
     # Compute stresses and strains
     eps = get_element_strains(u, voxels, L)

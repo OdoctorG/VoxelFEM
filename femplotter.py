@@ -22,6 +22,37 @@ def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray =
     else:
         return None
 
+def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
+            flip_y: bool = False, z_order=2) -> plt.Figure:
+    if new_figure:
+        fig = plt.figure()
+    for i in range(voxels.shape[0]):
+        for j in range(voxels.shape[1]):
+            if voxels[i, j] == 1:
+                nodes = coord_to_nodes(i, j, voxels.shape[1])
+                node_displacements = []
+                for node in nodes:
+                    node_displacements.append((u[node*2]*scale, u[node*2+1]*scale))
+
+                line1 = [[j+offset[0]+node_displacements[0][0], j+offset[0]+1+node_displacements[1][0]], 
+                        [i+offset[1]+node_displacements[0][1], i+offset[1]+node_displacements[1][1]]]
+                line2 = [[j+offset[0]+1+node_displacements[1][0], j+offset[0]+1+node_displacements[3][0]], 
+                        [i+offset[1]+node_displacements[1][1], i+1+offset[1]+node_displacements[3][1]]]
+                line3 = [[j+offset[0]+1+node_displacements[3][0], j+offset[0]+node_displacements[2][0]], 
+                        [i+offset[1]+1+node_displacements[3][1], i+offset[1]+1+node_displacements[2][1]]]
+                line4 = [[j+offset[0]+node_displacements[2][0], j+offset[0]+node_displacements[0][0]], 
+                        [i+offset[1]+1+node_displacements[2][1], i+offset[1]+node_displacements[0][1]]]
+
+                for line in [line1, line2, line3, line4]:
+                    plt.plot(line[0], line[1], color="black", zorder=z_order)
+    ax = fig.axes
+    ax[0].invert_yaxis()
+    if new_figure:
+        return fig
+    else:
+        return None
+
+
 def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Figure:
     """
     Plot a vector at each node in the mesh, given the values and the voxel representation of the geometry.
@@ -41,8 +72,7 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Fi
     """
     
     fig = plt.figure()
-    plt.imshow(voxels, cmap="binary", alpha=0.5)
-    plot_mesh(voxels, offset=[-0.5, -0.5])
+    
     print(vals.shape)
     norm = Normalize(vals.min(), vals.max())
     for i in range(len(vals)//2):
@@ -52,9 +82,10 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Fi
         color = cm.viridis(norm(vector_length))
 
         if vector_length > 0:
-            plt.arrow(coord[1]-0.5, coord[0]-0.5, scale*vals[i*2][0], scale*vals[i*2+1][0], color=color, head_width=np.log(vector_length*scale*0.5+1)+0.01,
+            plt.arrow(coord[1], coord[0], scale*vals[i*2][0], scale*vals[i*2+1][0], color=color, head_width=np.log(vector_length*scale*0.5+1)+0.01,
                     zorder=3)
-    
+    fig.axes[0].invert_yaxis()
+    plot_mesh(voxels)
     return fig
 def node_value_plot(vals: np.ndarray, voxels: np.ndarray, scale=1) -> plt.Figure:
     """
@@ -96,7 +127,8 @@ def node_value_plot(vals: np.ndarray, voxels: np.ndarray, scale=1) -> plt.Figure
                 result = np.dot(vectors, z)
 
                 # Plot the result
-                plt.pcolormesh(X*0.5+j, Y*(-0.5)-i, result, cmap='viridis', norm=norm)
+                plt.pcolormesh(X*0.5+0.5+j, Y*(0.5)+0.5+i, result, cmap='viridis', norm=norm)
     plt.colorbar()
-    plot_mesh(voxels, offset=[-0.5, -0.5], flip_y=True)
+    fig.axes[0].invert_yaxis()
+    plot_mesh(voxels)
     return fig
