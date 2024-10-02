@@ -7,6 +7,27 @@ from femsolver import nodes_to_coord, coord_to_nodes, shape_function
 
 def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
             flip_y: bool = False, z_order=2) -> plt.Figure:
+    """
+    Plot a 2D mesh given the voxel representation of the geometry.
+
+    Parameters
+    ----------
+    voxels : np.ndarray
+        2D array of voxels, where 1 indicates a solid voxel and 0 indicates a void voxel.
+    new_figure : bool
+        If true, create a new figure. Otherwise, plot to the current figure.
+    offset : np.ndarray
+        Offset the plot by the given vector.
+    flip_y : bool
+        If true, flip the y axis.
+    z_order : int
+        Plot order for z axis.
+
+    Returns
+    -------
+    plt.Figure
+        If new_figure is true, return the new figure. Otherwise, return None.
+    """
     if new_figure:
         fig = plt.figure()
     for i in range(voxels.shape[0]):
@@ -23,7 +44,32 @@ def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray =
         return None
 
 def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
-            flip_y: bool = False, z_order=2) -> plt.Figure:
+                z_order=2) -> plt.Figure:
+    """
+    Plot a deformed mesh based on the given nodal displacements and voxel representation of the geometry.
+
+    Parameters
+    ----------
+    u : np.ndarray
+        1D array of nodal displacements, where each node has two degrees of freedom (x and y).
+    voxels : np.ndarray
+        2D array of voxels, where 1 indicates a solid voxel and 0 indicates a void voxel.
+    scale : float
+        Scale factor for the displacements. Default is 10e9.
+    new_figure : bool
+        If True, a new figure is created and returned. If False, the plot is drawn on the current figure. Default is False.
+    offset : np.ndarray
+        Optional offset of the plot. Default is [0, 0].
+    z_order : int
+        Z-order of the plot. Default is 2.
+
+    Returns
+    -------
+    plt.Figure
+        If new_figure is True, a new figure is created and returned. Otherwise, None is returned.
+
+    """
+
     if new_figure:
         fig = plt.figure()
     for i in range(voxels.shape[0]):
