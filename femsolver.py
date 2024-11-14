@@ -1,5 +1,8 @@
 import math
 import numpy as np
+import pyamg
+import scipy.sparse
+import scipy.sparse.linalg
 
 """ 
 Voxel 2D FEM Solver 
@@ -19,10 +22,8 @@ N₄ = (1 + ξ)(1 + η) / 4
 """
 
 
-# Number of Gauss points, if set to 1 you get very bad results. 2 and up reccommend
+# Number of Gauss points, if set to 1 you get very bad results. 2 and up recommended
 NGAUSS = 2
-
-
 
 def B_matrix(xi, eta, L):
     """
@@ -72,7 +73,7 @@ def gauss_points(N: int) -> tuple[list, list]:
         return ([0.339981633, -0.339981633, 0.861136311, -0.861136311], [0.652145, 0.652145, 0.347855, 0.347855])
     return (None, None)
 
-def element_stiffness_matrix(E: float, nu: float, L, t):
+def element_stiffness_matrix(E: float, nu: float, L, t) -> np.ndarray:
     """
     Compute the 8x8 element stiffness matrix for the square element, given material properties E and nu.
 
@@ -154,8 +155,8 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
                 # Get nodal displacements
                 el_u = np.zeros(8)
                 for k in range(len(nodes)):
-                    el_u[k] = u[nodes[k]][0]
-                    el_u[k+1] = u[nodes[k]+1][0]
+                    el_u[k] = u[nodes[k]]
+                    el_u[k+1] = u[nodes[k]+1]
 
                 # Loop over all Gauss points
                 xi_idx = 0
@@ -316,7 +317,7 @@ def nodes_to_coord(node_idx, W) -> tuple[int, int, int, int]:
     j = node_idx % (W+1)
     return (i, j)
 
-def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> np.ndarray:
+def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.dok_matrix:
     """
     Compute the global stiffness matrix (2 dofs per node) from the element stiffness matrix and the voxel representation of the geometry. 
 
@@ -340,7 +341,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> np.ndarray:
     dof_per_node = 2
     n_dofs = (voxels.shape[0]+1)*(voxels.shape[1]+1)*dof_per_node
     Width = voxels.shape[1]
-    K = np.zeros((n_dofs, n_dofs))
+    K = scipy.sparse.dok_matrix((n_dofs, n_dofs))
 
     # Loop over all voxels
     for i in range(voxels.shape[0]):
@@ -370,7 +371,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> np.ndarray:
 
                     K[global_i:global_i+2, global_i:global_i+2] += Ke[ii:ii+2, ii:ii+2] # diagonal (self)
     
-    return K
+    return K.tolil()
 
 def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
@@ -395,7 +396,7 @@ def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     F[node_idx*2+1] = force[1]
     return F
 
-def fix_boundary_nodes(node_indices, K: np.ndarray, F: np.ndarray) -> np.ndarray:
+def fix_boundary_nodes(node_indices, K: scipy.sparse.dok_matrix, F: np.ndarray) -> tuple[scipy.sparse.dok_matrix, np.ndarray, list]:
     # Find boundary nodes, and remove them from the K and F arrays
     # Return the updated K and F arrays as well as the indicesn (of the dof) of the boundary nodes
 
@@ -405,13 +406,13 @@ def fix_boundary_nodes(node_indices, K: np.ndarray, F: np.ndarray) -> np.ndarray
         dof_indices.append(node_idx*2)
         dof_indices.append(node_idx*2+1)
     
-    K = np.delete(K, dof_indices, axis=0)
-    K = np.delete(K, dof_indices, axis=1)
+    K = K[[i for i in range(K.shape[0]) if i not in dof_indices], :]
+    K = K[:, [i for i in range(K.shape[1]) if i not in dof_indices]]
     F = np.delete(F, dof_indices, axis=0)
 
     return K, F, dof_indices
 
-def fix_null_nodes(K: np.ndarray, F: np.ndarray) -> np.ndarray:
+def fix_null_nodes(K: scipy.sparse.dok_matrix, F: np.ndarray) -> tuple[scipy.sparse.dok_matrix, np.ndarray, list]:
     # Find null nodes, and remove them from the K and F arrays
     # Return the updated K and F arrays as well as the indices (of the dof) of the null nodes
 
@@ -422,14 +423,14 @@ def fix_null_nodes(K: np.ndarray, F: np.ndarray) -> np.ndarray:
             null_nodes.append(i)
     
     # Remove null nodes
-    K = np.delete(K, null_nodes, axis=0)
-    K = np.delete(K, null_nodes, axis=1)
+    K = K[[i for i in range(K.shape[0]) if i not in null_nodes], :]
+    K = K[:, [i for i in range(K.shape[1]) if i not in null_nodes]]
     F = np.delete(F, null_nodes, axis=0)
 
     return K, F, null_nodes
 
 
-def solve(K: np.ndarray, F: np.ndarray, fixed_nodes: list) -> np.ndarray:
+def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list) -> np.ndarray:
     """
     Solve the linear system K @ u = F, subject to displacement boundary conditions.
 
@@ -450,17 +451,16 @@ def solve(K: np.ndarray, F: np.ndarray, fixed_nodes: list) -> np.ndarray:
 
     K_red, F_red, _ = fix_boundary_nodes(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
     K_red, F_red, null_nodes = fix_null_nodes(K_red, F_red) # Remove null nodes (unconnected nodes)
-    #u_red = np.linalg.pinv(K_red) @ F_red
-    u_red = np.linalg.solve(K_red, F_red)
-    print(len(u_red))
+    
+    u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
+    
     u = u_red
     for i in range(len(null_nodes)): # Add back null nodes
         u = np.insert(u, null_nodes[i], 0, axis=0)
-    print(len(u))
+    
     for i in range(len(fixed_nodes)): # Add back fixed nodes
         u = np.insert(u, fixed_nodes[i], 0, axis=0)
         u = np.insert(u, fixed_nodes[i], 0, axis=0)
-    print(len(u))
     return u
 
 def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
@@ -476,12 +476,15 @@ def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
 def test():
     import matplotlib.pyplot as plt
     import femplotter
+    import time
     # Simple test case for the voxel fem solver
 
     E = 200e9  # Young's modulus (Pa)
     nu = 0.3   # Poisson's ratio
     L = 0.01    # Side length (m)
     t = 0.1   # Thickness (m)
+    
+    t1 = time.perf_counter_ns()
 
     Ke = element_stiffness_matrix(E, nu, L, t)
 
@@ -497,10 +500,17 @@ def test():
 
     # Define the force
     F = np.zeros((n_dofs, 1))
-    F = add_force_to_node(3, F, np.array([0, 0.5]))
+    F = add_force_to_node(4, F, np.array([0, 0.5]))
+
+    t2 = time.perf_counter_ns()
 
     # Solve displacements (and add boundary conditions)
     u = solve(K, F, [20, 21, 22, 23, 24])
+
+    t3 = time.perf_counter_ns()
+
+    print("Time to setup system: ", (t2-t1))
+    print("Time to solve system: ", (t3-t2))
 
     # Plot the displacements
     vector_figure = femplotter.node_vector_plot(u, voxels)
@@ -521,3 +531,4 @@ def test():
 
 if __name__ == "__main__":
     test()
+
