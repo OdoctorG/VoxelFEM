@@ -44,7 +44,6 @@ class Object2D:
             x_rot = (corners[i][0] - self.x) * c - (corners[i][1] - self.y) * s
             y_rot = (corners[i][0] - self.x) * s + (corners[i][1] - self.y) * c
             corners[i] = (x_rot+ self.x, y_rot+ self.y)
-        print(corners)
         return corners
 
 class ObjectManager:
@@ -194,7 +193,7 @@ def test():
 
     # Solve FEM
     voxels = grid.getVoxels()
-    import femsolver, femplotter
+    import femsolver, femplotter, time
 
     E = 200e9  # Young's modulus (Pa)
     nu = 0.3   # Poisson's ratio
@@ -203,15 +202,21 @@ def test():
 
     print("Setting up")
 
+    t1 = time.perf_counter()
     Ke = femsolver.element_stiffness_matrix(E, nu, L, t)
+    t2 = time.perf_counter()
     K = femsolver.global_stiffness_matrix(Ke, voxels)
+    t3 = time.perf_counter()
+
+    print(f"Element stiffeness took {t2-t1} seconds, global stiffnes matrix took {t3-t2} seconds")
+
     n_dofs = K.shape[0]
 
     F = np.zeros((n_dofs, 1))
     F = femsolver.add_force_to_node(4, F, np.array([0, 0.5]))
 
     print("Solving")
-    u = femsolver.solve(K, F, [20, 21, 22, 23, 24])
+    u = femsolver.solve(K.tocsr(), F, [20, 21, 22, 23, 24])
     
     # Compute stresses and strains
     eps = femsolver.get_element_strains(u, voxels, L)

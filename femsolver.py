@@ -3,7 +3,7 @@ import numpy as np
 import pyamg
 import scipy.sparse
 import scipy.sparse.linalg
-
+import time
 """ 
 Voxel 2D FEM Solver 
 
@@ -317,7 +317,7 @@ def nodes_to_coord(node_idx, W) -> tuple[int, int, int, int]:
     j = node_idx % (W+1)
     return (i, j)
 
-def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.dok_matrix:
+def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.csr_matrix:
     """
     Compute the global stiffness matrix (2 dofs per node) from the element stiffness matrix and the voxel representation of the geometry. 
 
@@ -338,10 +338,16 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
     This function assumes that the element stiffness matrix is symmetric, i.e., Ke = Ke.T.
     The function also assumes that the voxels are numbered in column-major order, i.e., the first column is 0, 1, 2, ... and the second column is Width, Width+1, Width+2, ...
     """
+
     dof_per_node = 2
     n_dofs = (voxels.shape[0]+1)*(voxels.shape[1]+1)*dof_per_node
     Width = voxels.shape[1]
+
+    # Use a dok_matrix to effieciently modify the sparse K matrix
     K = scipy.sparse.dok_matrix((n_dofs, n_dofs))
+
+    # Define the connections for the square element
+    connections = np.array([(0,1), (1,3), (3,2), (2,0)])
 
     # Loop over all voxels
     for i in range(voxels.shape[0]):
@@ -350,28 +356,18 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
                 # Convert the voxel coordinates to node numbers
                 my_nodes = coord_to_nodes(i, j, Width)
 
-                # Define the connections for the square element
-                connections = [
-                    (0,1), 
-                    (1,3),
-                    (3,2),
-                    (2,0)
-                ]
-                
                 # Loop over all connections
                 for connection in connections:
                     # Add all connections to global stiffness matrix
-                    ii = connection[0]*2
-                    jj = connection[1]*2
                     global_i = my_nodes[connection[0]]*2
                     global_j = my_nodes[connection[1]]*2
 
-                    K[global_i:global_i+2, global_j:global_j+2] += Ke[ii:ii+2, jj:jj+2]
-                    K[global_j:global_j+2, global_i:global_i+2] += Ke[jj:jj+2, ii:ii+2] # symmetry
-
-                    K[global_i:global_i+2, global_i:global_i+2] += Ke[ii:ii+2, ii:ii+2] # diagonal (self)
-    
-    return K.tolil()
+                    K[global_i:global_i+2, global_j:global_j+2] += Ke[connection[0]*2:connection[0]*2+2, connection[1]*2:connection[1]*2+2]
+                    # symmetry
+                    K[global_j:global_j+2, global_i:global_i+2] += Ke[connection[1]*2:connection[1]*2+2, connection[0]*2:connection[0]*2+2]
+                    # diagonal (self)
+                    K[global_i:global_i+2, global_i:global_i+2] += Ke[connection[0]*2:connection[0]*2+2, connection[0]*2:connection[0]*2+2]
+    return K.tocsr()
 
 def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
@@ -396,38 +392,43 @@ def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     F[node_idx*2+1] = force[1]
     return F
 
-def fix_boundary_nodes(node_indices, K: scipy.sparse.dok_matrix, F: np.ndarray) -> tuple[scipy.sparse.dok_matrix, np.ndarray, list]:
+def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
     # Find boundary nodes, and remove them from the K and F arrays
     # Return the updated K and F arrays as well as the indicesn (of the dof) of the boundary nodes
 
-    dof_indices = []
+    # dof_indices = []
     
-    for node_idx in node_indices:
-        dof_indices.append(node_idx*2)
-        dof_indices.append(node_idx*2+1)
+    # for node_idx in node_indices:
+    #     dof_indices.append(node_idx*2)
+    #     dof_indices.append(node_idx*2+1)
     
-    K = K[[i for i in range(K.shape[0]) if i not in dof_indices], :]
-    K = K[:, [i for i in range(K.shape[1]) if i not in dof_indices]]
-    F = np.delete(F, dof_indices, axis=0)
+    # K = K.tolil()
+    # K = K[np.delete(np.arange(K.shape[0]), dof_indices), :]
+    # K = K[:, np.delete(np.arange(K.shape[1]), dof_indices)]
+    # K = K.tocsr()
+    # F = np.delete(F, dof_indices, axis=0)
+
+    # return K, F, dof_indices
+
+    dof_indices = np.array([node_idx*2 for node_idx in node_indices] + [node_idx*2+1 for node_idx in node_indices])
+    keep_nodes = np.ones(K.shape[0], dtype=bool)
+    keep_nodes[dof_indices] = False
+
+    K = K[keep_nodes, :][:, keep_nodes]
+    F = F[keep_nodes]
 
     return K, F, dof_indices
 
-def fix_null_nodes(K: scipy.sparse.dok_matrix, F: np.ndarray) -> tuple[scipy.sparse.dok_matrix, np.ndarray, list]:
-    # Find null nodes, and remove them from the K and F arrays
-    # Return the updated K and F arrays as well as the indices (of the dof) of the null nodes
 
-    # Find null nodes
-    null_nodes = []
-    for i in range(K.shape[0]):
-        if (K[i,i] == 0):
-            null_nodes.append(i)
-    
-    # Remove null nodes
-    K = K[[i for i in range(K.shape[0]) if i not in null_nodes], :]
-    K = K[:, [i for i in range(K.shape[1]) if i not in null_nodes]]
-    F = np.delete(F, null_nodes, axis=0)
+def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
+    null_nodes = K.diagonal() == 0
+    keep_nodes = ~null_nodes
 
-    return K, F, null_nodes
+    K = K[keep_nodes, :][:, keep_nodes]
+    F = F[keep_nodes]
+
+    return K, F, np.where(null_nodes)[0]
+
 
 
 def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list) -> np.ndarray:
@@ -449,18 +450,31 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list) -> np.nd
         Solution vector with displacements at each node.
     """
 
+    pret1 = time.perf_counter()
     K_red, F_red, _ = fix_boundary_nodes(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
     K_red, F_red, null_nodes = fix_null_nodes(K_red, F_red) # Remove null nodes (unconnected nodes)
-    
+    pret2 = time.perf_counter()
+    print(f"Preprocessing took {pret2-pret1} seconds")
+
+    t1 = time.perf_counter()
     u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
-    
+    t2 = time.perf_counter()
+    amg_solver = pyamg.ruge_stuben_solver(K_red.tocsr())
+    u_red_amg = amg_solver.solve(F_red)
+    t3 = time.perf_counter()
+
+    print(f"Solved in {t2-t1} seconds using spsolve")
+    print(f"Solved in {t3-t2} seconds using smoothed_aggregation_solver")
+
     u = u_red
+
     for i in range(len(null_nodes)): # Add back null nodes
         u = np.insert(u, null_nodes[i], 0, axis=0)
-    
+
     for i in range(len(fixed_nodes)): # Add back fixed nodes
         u = np.insert(u, fixed_nodes[i], 0, axis=0)
         u = np.insert(u, fixed_nodes[i], 0, axis=0)
+    
     return u
 
 def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
