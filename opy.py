@@ -1,6 +1,8 @@
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+
+
 ax = plt.axes()
 
 class Object2D:
@@ -23,8 +25,8 @@ class Object2D:
         plt.axis('scaled')
     
     def pointInside(self, x: float, y: float) -> bool:
-        s = np.sin(np.radians(self.rot))
-        c = np.cos(np.radians(self.rot))
+        s = np.sin(np.radians(-self.rot))
+        c = np.cos(np.radians(-self.rot))
         x_rot = (x - self.x) * c - (y - self.y) * s
         y_rot = (x - self.x) * s + (y - self.y) * c
         #print(x, y, " inside: ", x_rot >= 0 and x_rot <= self.w and y_rot >= 0 and y_rot <= self.h)
@@ -135,23 +137,15 @@ class Grid:
             y >= self.miny + j * (self.maxy - self.miny) / self.ydivs and \
             y <= self.miny + (j + 1) * (self.maxy - self.miny) / self.ydivs
     
-    # Function sets voxel[i, j]=1 if the voxel has any object inside of it
-    def addVoxelsInside(self, objects: ObjectManager):
-        for obj in objects.objects:
-            for c in obj.getCorners():
-                i = math.floor((c[0] - self.minx) / (self.maxx - self.minx) * self.xdivs)
-                j = math.floor((c[1] - self.miny) / (self.maxy - self.miny) * self.ydivs)
-                if i  >= 0 and i < self.xdivs and j >= 0 and j < self.ydivs:
-                    self.voxels[i, j] = 1
-                    print(i, j, "inside")
-                else:
-                    print(i, j, "outside")
+    
+
     def doLineSegmentsIntersect(self, p1, p2, p3, p4):
         def ccw(A, B, C):
             return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
         return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
     
-    def addVoxelsInside2(self, objects: ObjectManager):
+    # Function sets voxel[i, j]=1 if the voxel has any object inside of it
+    def addVoxelsInside(self, objects: ObjectManager):
         for obj in objects.objects:
             corners = obj.getCorners()
             for i in range(self.xdivs):
@@ -160,6 +154,16 @@ class Grid:
                     voxel_maxx = voxel_minx + (self.maxx - self.minx) / self.xdivs
                     voxel_miny = self.miny + j * (self.maxy - self.miny) / self.ydivs
                     voxel_maxy = voxel_miny + (self.maxy - self.miny) / self.ydivs
+
+                    voxel_center_x = (voxel_minx + voxel_maxx) / 2
+                    voxel_center_y = (voxel_miny + voxel_maxy) / 2
+
+                    # Check if voxel center is inside object
+                    if obj.pointInside(voxel_center_x, voxel_center_y):
+                        self.voxels[j, i] = 1
+                        continue
+
+                    # Check if voxel intersects with object edges
                     for k in range(len(corners)):
                         p1 = corners[k]
                         p2 = corners[(k+1) % len(corners)]  # wrap around to first corner after last corner
@@ -174,18 +178,58 @@ class Grid:
     def getVoxels(self) -> np.ndarray:
         return self.voxels
 
+def test():
+    # Construct geometry
+    objects = ObjectManager()
+    ground = Object2D(0, 0, 10, 1, 0)
+    platform = Object2D(6, 7, 5, 1, -45)
+    objects.add(ground)
+    objects.add(platform)
+    objects.draw()
 
-objects = ObjectManager()
-ground = Object2D(0, 0, 10, 1, 0)
-platform = Object2D(6, 7, 5, 1, -45)
-objects.add(ground)
-objects.add(platform)
-objects.draw()
+    bbox = objects.getBoundingBox()
+    grid = Grid(bbox[0], bbox[1], bbox[2], bbox[3], 100, 50)
+    grid.addVoxelsInside(objects)
+    grid.draw()
 
-bbox = objects.getBoundingBox()
-grid = Grid(bbox[0], bbox[1], bbox[2], bbox[3], 100, 50)
-grid.addVoxelsInside2(objects)
-grid.draw()
+    # Solve FEM
+    voxels = grid.getVoxels()
+    import femsolver, femplotter
 
+    E = 200e9  # Young's modulus (Pa)
+    nu = 0.3   # Poisson's ratio
+    L = 0.01    # Side length (m)
+    t = 0.1   # Thickness (m)
 
-plt.show()
+    print("Setting up")
+
+    Ke = femsolver.element_stiffness_matrix(E, nu, L, t)
+    K = femsolver.global_stiffness_matrix(Ke, voxels)
+    n_dofs = K.shape[0]
+
+    F = np.zeros((n_dofs, 1))
+    F = femsolver.add_force_to_node(4, F, np.array([0, 0.5]))
+
+    print("Solving")
+    u = femsolver.solve(K, F, [20, 21, 22, 23, 24])
+    
+    # Compute stresses and strains
+    eps = femsolver.get_element_strains(u, voxels, L)
+    sigma = femsolver.get_element_stresses(eps, E, nu)
+    n_sigma = femsolver.get_node_values(sigma, voxels, L)
+
+    print("Plot displaced mesh")
+    # Plot the displacements
+    femplotter.plot_displaced_mesh(u, voxels, new_figure=True)
+
+    # Plot the von_mises stresses
+    print("Get stresses in nodes")
+    von_mises = femsolver.von_mises_stresses_node(n_sigma)
+    print("plot stresses")
+    von_mises_figure = femplotter.node_value_plot(von_mises, voxels)
+    von_mises_figure.suptitle("von Mises stresses")
+    print("plot show (render)")
+    plt.show()
+
+if __name__ == "__main__":
+    test()
