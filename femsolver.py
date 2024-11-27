@@ -118,6 +118,7 @@ def element_stiffness_matrix(E: float, nu: float, L, t) -> np.ndarray:
             K += w[xi_idx] * w[eta_idx] * np.dot(np.dot(B.T, D), B) * J * t
             eta_idx += 1
         xi_idx += 1
+    print(K)
     return K
 
 def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarray:
@@ -317,6 +318,7 @@ def nodes_to_coord(node_idx, W) -> tuple[int, int, int, int]:
     j = node_idx % (W+1)
     return (i, j)
 
+
 def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.csr_matrix:
     """
     Compute the global stiffness matrix (2 dofs per node) from the element stiffness matrix and the voxel representation of the geometry. 
@@ -338,36 +340,57 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
     This function assumes that the element stiffness matrix is symmetric, i.e., Ke = Ke.T.
     The function also assumes that the voxels are numbered in column-major order, i.e., the first column is 0, 1, 2, ... and the second column is Width, Width+1, Width+2, ...
     """
-
+    
     dof_per_node = 2
     n_dofs = (voxels.shape[0]+1)*(voxels.shape[1]+1)*dof_per_node
-    Width = voxels.shape[1]
+    width = voxels.shape[1]
 
-    # Use a dok_matrix to effieciently modify the sparse K matrix
-    K = scipy.sparse.dok_matrix((n_dofs, n_dofs))
+    # Estimate number of non-zero entries
+    nnz = np.sum(voxels == 1) * 4 * 16
 
+    # Initialize sparse matrix
+    data = np.zeros(nnz, dtype=float)
+    row_indices = np.zeros(nnz, dtype=int)
+    col_indices = np.zeros(nnz, dtype=int)
+    
     # Define the connections for the square element
     connections = np.array([(0,1), (1,3), (3,2), (2,0)])
 
-    # Loop over all voxels
-    for i in range(voxels.shape[0]):
-        for j in range(voxels.shape[1]):
-            if voxels[i, j] == 1:
-                # Convert the voxel coordinates to node numbers
-                my_nodes = coord_to_nodes(i, j, Width)
+    # Get the indices of the solid voxels
+    solid_voxel_indices = np.argwhere(voxels == 1)
 
-                # Loop over all connections
-                for connection in connections:
-                    # Add all connections to global stiffness matrix
-                    global_i = my_nodes[connection[0]]*2
-                    global_j = my_nodes[connection[1]]*2
+    # Loop over all solid voxels
+    idx = 0
+    for i, j in solid_voxel_indices:
+        # Convert the voxel coordinates to node numbers
+        my_nodes = coord_to_nodes(i, j, width)
 
-                    K[global_i:global_i+2, global_j:global_j+2] += Ke[connection[0]*2:connection[0]*2+2, connection[1]*2:connection[1]*2+2]
-                    # symmetry
-                    K[global_j:global_j+2, global_i:global_i+2] += Ke[connection[1]*2:connection[1]*2+2, connection[0]*2:connection[0]*2+2]
-                    # diagonal (self)
-                    K[global_i:global_i+2, global_i:global_i+2] += Ke[connection[0]*2:connection[0]*2+2, connection[0]*2:connection[0]*2+2]
-    return K.tocsr()
+        # Add all connections to global stiffness matrix
+        for k, connection in enumerate(connections):
+            global_i = my_nodes[connection[0]]*2
+            global_j = my_nodes[connection[1]]*2
+            for l in range(2):
+                for m in range(2):
+                    link = Ke[connection[0]*2+l, connection[1]*2+m] # connection
+                    diagonal = Ke[connection[0]*2+l, connection[0]*2+m] # diagonal (self)
+
+                    # Add all connections to the sparse matrix
+                    data[idx] = link
+                    data[idx+1] = link
+                    row_indices[idx] = global_i+l
+                    col_indices[idx] = global_j+m
+                    row_indices[idx+1] = global_j+m
+                    col_indices[idx+1] = global_i+l
+                    idx += 2
+                    data[idx] = diagonal
+                    row_indices[idx] = global_i + l
+                    col_indices[idx] = global_i + m
+                    idx += 1
+
+    # Create the sparse matrix
+    K = scipy.sparse.csr_matrix((data, (row_indices, col_indices)), shape=(n_dofs, n_dofs))
+
+    return K
 
 def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
