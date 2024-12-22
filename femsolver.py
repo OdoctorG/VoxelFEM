@@ -118,7 +118,6 @@ def element_stiffness_matrix(E: float, nu: float, L, t) -> np.ndarray:
             K += w[xi_idx] * w[eta_idx] * np.dot(np.dot(B.T, D), B) * J * t
             eta_idx += 1
         xi_idx += 1
-    print(K)
     return K
 
 def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarray:
@@ -156,8 +155,8 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
                 # Get nodal displacements
                 el_u = np.zeros(8)
                 for k in range(len(nodes)):
-                    el_u[k] = u[nodes[k]]
-                    el_u[k+1] = u[nodes[k]+1]
+                    el_u[2*k] = u[2*nodes[k]]
+                    el_u[2*k+1] = u[2*nodes[k]+1]
 
                 # Loop over all Gauss points
                 xi_idx = 0
@@ -230,6 +229,21 @@ def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.n
     
     return strains
 
+def get_voxel_values(node_values, voxels):
+    # Average over the node value of each corner in each voxel
+    # TODO: change to integrate over the gauss points inside the voxel instead.
+    voxel_values = np.zeros((voxels.shape[0], voxels.shape[1]))
+    for i in range(voxels.shape[0]):
+        for j in range(voxels.shape[1]):
+            if voxels[i, j] == 1:
+                nodes = coord_to_nodes(i, j, voxels.shape[1])
+                mean = 0
+                for n in nodes:
+                    mean += node_values[n]
+                voxel_values[i, j] = mean/len(nodes)
+    
+    return voxel_values
+
 def get_element_stresses(element_strains: np.ndarray, E: float, nu: float) -> np.ndarray:
     """
     Compute stresses at each gauss point in each element, from element strains, given material properties E and nu.
@@ -255,11 +269,8 @@ def get_element_stresses(element_strains: np.ndarray, E: float, nu: float) -> np
                                     [0, 0, (1-nu)/2]])
     
     # Compute stresses
-    stresses = np.zeros((element_strains.shape[0], element_strains.shape[1]), dtype=object)
-    for i in range(element_strains.shape[0]):
-        for j in range(element_strains.shape[1]):
-            stresses[i,j] = np.dot(D, element_strains[i,j])
-    
+    stresses = np.dot(element_strains, D)
+
     return stresses
 
 def von_mises_stresses(stresses: np.ndarray) -> np.ndarray:
@@ -308,16 +319,15 @@ def von_mises_stresses_node(stresses: np.ndarray) -> np.ndarray:
     return von_mises
 
 
-def coord_to_nodes(i,j, W) -> tuple[int, int, int, int]:
+def coord_to_nodes(i,j, width) -> tuple[int, int, int, int]:
     """Convert voxel coordinates to node indices"""
-    return (i*(W+1)+j, i*(W+1)+j+1, (i+1)*(W+1)+j, (i+1)*(W+1)+j+1)
+    return (i*(width+1)+j, i*(width+1)+j+1, (i+1)*(width+1)+j, (i+1)*(width+1)+j+1)
 
-def nodes_to_coord(node_idx, W) -> tuple[int, int, int, int]:
+def nodes_to_coord(node_idx, width) -> tuple[int, int]:
     """Convert node indices to voxel coordinates"""
-    i = node_idx // (W+1)
-    j = node_idx % (W+1)
+    i = node_idx // (width+1)
+    j = node_idx % (width+1)
     return (i, j)
-
 
 def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.csr_matrix:
     """
@@ -337,59 +347,38 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
 
     Notes
     -----
-    This function assumes that the element stiffness matrix is symmetric, i.e., Ke = Ke.T.
-    The function also assumes that the voxels are numbered in column-major order, i.e., the first column is 0, 1, 2, ... and the second column is Width, Width+1, Width+2, ...
+    The function assumes that the voxels are numbered in column-major order, i.e., the first column is 0, 1, 2, ... and the second column is Width, Width+1, Width+2, ...
     """
-    
     dof_per_node = 2
-    n_dofs = (voxels.shape[0]+1)*(voxels.shape[1]+1)*dof_per_node
+    n_dofs = (voxels.shape[0] + 1) * (voxels.shape[1] + 1) * dof_per_node
     width = voxels.shape[1]
 
     # Estimate number of non-zero entries
-    nnz = np.sum(voxels == 1) * 4 * 16
+    nnz = np.sum(voxels == 1) * 64  # Each voxel contributes 8x8 stiffness entries
 
-    # Initialize sparse matrix
+    # Initialize sparse matrix storage
     data = np.zeros(nnz, dtype=float)
     row_indices = np.zeros(nnz, dtype=int)
     col_indices = np.zeros(nnz, dtype=int)
-    
-    # Define the connections for the square element
-    connections = np.array([(0,1), (1,3), (3,2), (2,0)])
 
     # Get the indices of the solid voxels
     solid_voxel_indices = np.argwhere(voxels == 1)
 
-    # Loop over all solid voxels
     idx = 0
     for i, j in solid_voxel_indices:
-        # Convert the voxel coordinates to node numbers
-        my_nodes = coord_to_nodes(i, j, width)
+        my_nodes = coord_to_nodes(i, j, width)  # Global node indices for this element
 
-        # Add all connections to global stiffness matrix
-        for k, connection in enumerate(connections):
-            global_i = my_nodes[connection[0]]*2
-            global_j = my_nodes[connection[1]]*2
-            for l in range(2):
-                for m in range(2):
-                    link = Ke[connection[0]*2+l, connection[1]*2+m] # connection
-                    diagonal = Ke[connection[0]*2+l, connection[0]*2+m] # diagonal (self)
+        for local_i in range(8):  # Loop over DOFs in element
+            global_i = my_nodes[local_i // 2] * 2 + local_i % 2
+            for local_j in range(8):
+                global_j = my_nodes[local_j // 2] * 2 + local_j % 2
+                data[idx] = Ke[local_i, local_j]
+                row_indices[idx] = global_i
+                col_indices[idx] = global_j
+                idx += 1
 
-                    # Add all connections to the sparse matrix
-                    data[idx] = link
-                    data[idx+1] = link
-                    row_indices[idx] = global_i+l
-                    col_indices[idx] = global_j+m
-                    row_indices[idx+1] = global_j+m
-                    col_indices[idx+1] = global_i+l
-                    idx += 2
-                    data[idx] = diagonal
-                    row_indices[idx] = global_i + l
-                    col_indices[idx] = global_i + m
-                    idx += 1
-
-    # Create the sparse matrix
+    # Assemble sparse matrix
     K = scipy.sparse.csr_matrix((data, (row_indices, col_indices)), shape=(n_dofs, n_dofs))
-
     return K
 
 def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
@@ -416,31 +405,17 @@ def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     return F
 
 def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
-    # Find boundary nodes, and remove them from the K and F arrays
-    # Return the updated K and F arrays as well as the indicesn (of the dof) of the boundary nodes
-
-    # dof_indices = []
-    
-    # for node_idx in node_indices:
-    #     dof_indices.append(node_idx*2)
-    #     dof_indices.append(node_idx*2+1)
-    
-    # K = K.tolil()
-    # K = K[np.delete(np.arange(K.shape[0]), dof_indices), :]
-    # K = K[:, np.delete(np.arange(K.shape[1]), dof_indices)]
-    # K = K.tocsr()
-    # F = np.delete(F, dof_indices, axis=0)
-
-    # return K, F, dof_indices
-
     dof_indices = np.array([node_idx*2 for node_idx in node_indices] + [node_idx*2+1 for node_idx in node_indices])
-    keep_nodes = np.ones(K.shape[0], dtype=bool)
-    keep_nodes[dof_indices] = False
+    new_K = K.copy().tolil()
+    # Sum of diagonal elements
+    Kdiag = np.mean(K.diagonal())
+    for dof in dof_indices:
+        new_K[dof, :] = 0
+        new_K[:, dof] = 0
+        new_K[dof, dof] = Kdiag
+        F[dof] = 0
 
-    K = K[keep_nodes, :][:, keep_nodes]
-    F = F[keep_nodes]
-
-    return K, F, dof_indices
+    return new_K.tocsr(), F
 
 
 def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
@@ -452,9 +427,7 @@ def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.spa
 
     return K, F, np.where(null_nodes)[0]
 
-
-
-def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list) -> np.ndarray:
+def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: bool = False) -> np.ndarray:
     """
     Solve the linear system K @ u = F, subject to displacement boundary conditions.
 
@@ -473,30 +446,33 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list) -> np.nd
         Solution vector with displacements at each node.
     """
 
+    
     pret1 = time.perf_counter()
-    K_red, F_red, _ = fix_boundary_nodes(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
+    K_red, F_red = fix_boundary_nodes(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
     K_red, F_red, null_nodes = fix_null_nodes(K_red, F_red) # Remove null nodes (unconnected nodes)
+    
+    #print(len(null_nodes))
     pret2 = time.perf_counter()
-    print(f"Preprocessing took {pret2-pret1} seconds")
+    if debug:
+        print(f"Preprocessing took {pret2-pret1} seconds")
 
     t1 = time.perf_counter()
+    print(np.linalg.cond(K_red.toarray()))
     u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
     t2 = time.perf_counter()
-    amg_solver = pyamg.ruge_stuben_solver(K_red.tocsr())
-    u_red_amg = amg_solver.solve(F_red)
-    t3 = time.perf_counter()
 
-    print(f"Solved in {t2-t1} seconds using spsolve")
-    print(f"Solved in {t3-t2} seconds using smoothed_aggregation_solver")
+    if debug: 
+        #amg_solver = pyamg.ruge_stuben_solver(K_red.tocsr())
+        #u_red = amg_solver.solve(F_red)
+        t3 = time.perf_counter()
+
+        print(f"Solved in {t2-t1} seconds using spsolve")
+        print(f"Solved in {t3-t2} seconds using smoothed_aggregation_solver")
 
     u = u_red
 
     for i in range(len(null_nodes)): # Add back null nodes
         u = np.insert(u, null_nodes[i], 0, axis=0)
-
-    for i in range(len(fixed_nodes)): # Add back fixed nodes
-        u = np.insert(u, fixed_nodes[i], 0, axis=0)
-        u = np.insert(u, fixed_nodes[i], 0, axis=0)
     
     return u
 
@@ -537,12 +513,12 @@ def test():
 
     # Define the force
     F = np.zeros((n_dofs, 1))
-    F = add_force_to_node(4, F, np.array([0, 0.5]))
+    F = add_force_to_node(4, F, np.array([0.5, 0.5]))
 
     t2 = time.perf_counter_ns()
 
     # Solve displacements (and add boundary conditions)
-    u = solve(K, F, [20, 21, 22, 23, 24])
+    u = solve(K, F, [5, 20, 21, 22, 23, 24], debug=True)
 
     t3 = time.perf_counter_ns()
 
