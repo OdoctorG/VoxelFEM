@@ -47,7 +47,7 @@ def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray =
     else:
         return None
 
-def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
+def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, auto_scale: bool = True, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
                 z_order=2) -> plt.Figure:
     """
     Plot a deformed mesh based on the given nodal displacements and voxel representation of the geometry.
@@ -60,6 +60,8 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
         2D array of voxels, where 1 indicates a solid voxel and 0 indicates a void voxel.
     scale : float
         Scale factor for the displacements. Default is 10e9.
+    auto_scale : bool
+        If True, automatically scale the displacements to the maximum magnitude. Default is True.
     new_figure : bool
         If True, a new figure is created and returned. If False, the plot is drawn on the current figure. Default is False.
     offset : np.ndarray
@@ -73,7 +75,10 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
         If new_figure is True, a new figure is created and returned. Otherwise, None is returned.
 
     """
-
+    vector_lengths = [np.sqrt(u[i*2]**2 + u[i*2+1]**2) for i in range(len(u)//2)]
+    if auto_scale:
+        scale = 1/np.max(vector_lengths)
+    fig = plt.gca().get_figure()
     if new_figure:
         fig = plt.figure()
     for i in range(voxels.shape[0]):
@@ -95,7 +100,9 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
 
                 for line in [line1, line2, line3, line4]:
                     plt.plot(line[0], line[1], color="black", zorder=z_order)
+    
     ax = fig.axes
+    plt.title("Deformed mesh, Scale Factor = {:.2E}".format(scale))
     ax[0].invert_yaxis()
     if new_figure:
         return fig
@@ -103,7 +110,7 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
         return None
 
 
-def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Figure:
+def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale: float =10e9, auto_scale: bool = True) -> plt.Figure:
     """
     Plot a vector at each node in the mesh, given the values and the voxel representation of the geometry.
 
@@ -115,12 +122,17 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Fi
         2D array of voxels, where 1 indicates a solid voxel and 0 indicates a void voxel.
     scale : float
         Scale factor for the vector length.
+    auto_scale : bool
+        If True, automatically scale the displacements to the maximum magnitude. Default is True
 
     Returns
     -------
     plt.Figure
         matplotlib figure
     """
+    vector_lengths = [np.sqrt(vals[i*2]**2 + vals[i*2+1]**2) for i in range(len(vals)//2)]
+    if auto_scale:
+        scale = 1/np.max(vector_lengths)
     
     fig = plt.figure()
     
@@ -128,13 +140,14 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale=10e9) -> plt.Fi
     for i in range(len(vals)//2):
         coord = nodes_to_coord(i, voxels.shape[1])
 
-        vector_length = np.sqrt(vals[i*2]**2 + vals[i*2+1]**2)
+        vector_length = vector_lengths[i]
         color = cm.viridis(norm(vector_length))
 
         if vector_length > 0:
             plt.arrow(coord[1], coord[0], scale*vals[i*2], scale*vals[i*2+1], color=color, head_width=np.log(vector_length*scale*0.5+1)+0.01,
                     zorder=3)
     fig.axes[0].invert_yaxis()
+    plt.title("Deformed mesh, Scale Factor = {:.2E}".format(scale))
     plot_mesh(voxels)
     return fig
 def node_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
