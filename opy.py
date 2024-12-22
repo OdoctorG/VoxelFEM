@@ -177,6 +177,105 @@ class Grid:
     def getVoxels(self) -> np.ndarray:
         return self.voxels
 
+
+def forward_pass(voxels):
+    import femsolver, femplotter, time
+
+    E = 200e9  # Young's modulus (Pa)
+    nu = 0.3   # Poisson's ratio
+    L = 0.01    # Side length (m)
+    t = 0.1   # Thickness (m)
+
+    break_limit = 500_000
+    highest_stress = 0
+
+    counter = 0
+    n_sigma = np.empty((0,0))
+    u = np.empty((0,0))
+    old_u = np.empty((0,0))
+    Ke = femsolver.element_stiffness_matrix(E, nu, L, t)
+    new_voxels = np.copy(voxels)
+    old_voxels = new_voxels
+    old_n_sigma = 0
+
+
+    # Lock nodes with boundary conditions
+    locked_nodes = [4, 20, 21, 22, 23, 24]
+    locked_voxels = []
+    for node in locked_nodes:
+        i, j = femsolver.nodes_to_coord(node, voxels.shape[1])
+        locked_voxels.append((i, j))
+
+    while True:
+        
+        old_n_sigma = n_sigma.copy()
+        old_u = u.copy()
+        
+        nnz = np.count_nonzero(new_voxels)
+        K = femsolver.global_stiffness_matrix(Ke, new_voxels)
+        n_dofs = K.shape[0]
+
+        F = np.zeros((n_dofs, 1))
+        u = np.zeros((n_dofs, 1))
+        F = femsolver.add_force_to_node(4, F, np.array([0, 0.5]))
+
+        u = femsolver.solve(K.tocsr(), F, [20, 21, 22, 23, 24], True)
+        
+        # Compute stresses and strains
+        eps = femsolver.get_element_strains(u, new_voxels, L)
+        sigma = femsolver.get_element_stresses(eps, E, nu)
+        n_sigma = femsolver.get_node_values(sigma, new_voxels, L)
+        
+        von_mises = femsolver.von_mises_stresses_node(n_sigma)
+        von_mises_v = femsolver.get_voxel_values(von_mises, new_voxels)
+
+        flat_von_mises = von_mises_v.flatten()
+        locked_indices = [v[0]*voxels.shape[1] + v[1] for v in locked_voxels]
+        sorted_indices = np.argsort(von_mises_v, axis=None)
+        highest_stress = von_mises_v.flatten()[sorted_indices[-1]]
+
+        if highest_stress > break_limit:
+            print("Breaking")
+            break
+        elif counter > 2:
+            print("Too many iterations")
+            break
+
+        old_voxels = new_voxels.copy()
+
+        flat_voxels = new_voxels.flatten()
+        i = 0
+        j = 0
+        while i < nnz//2 and j < len(sorted_indices):
+            if flat_voxels[sorted_indices[j]] == 1 and sorted_indices[j] not in locked_indices:
+                i += 1
+                flat_voxels[sorted_indices[j]] = 0
+            j += 1
+
+        #print(np.sum(new_voxels == 1))
+        new_voxels = np.reshape(flat_voxels, (voxels.shape[0], voxels.shape[1]))
+        print(f"iteration {counter}, highest stress: {highest_stress}")
+
+        counter += 1
+
+
+
+    print(f"Break limit: {break_limit}, highest stress: {highest_stress}")
+    von_mises = femsolver.von_mises_stresses_node(old_n_sigma)
+    print("plot stresses")
+    von_mises_figure = femplotter.node_value_plot(von_mises, old_voxels)
+    locked_voxels.remove((0, 4))
+    for v in locked_voxels:
+        plt.plot(v[1], v[0], 'ro')
+    plt.arrow(4, 0, 0, 5, head_width=0.5, head_length=0.5, fc='red', ec='red', zorder=2)
+    
+    femplotter.plot_displaced_mesh(old_u, old_voxels, new_figure=True, scale=10e9)
+
+    
+    #femplotter.plot_mesh(voxels, new_figure=True)
+    plt.show()
+
+
 def test():
     # Construct geometry
     objects = ObjectManager()
@@ -190,10 +289,14 @@ def test():
     grid = Grid(bbox[0], bbox[1], bbox[2], bbox[3], 100, 50)
     grid.addVoxelsInside(objects)
     grid.draw()
+    plt.gcf().axes[0].invert_yaxis()
 
     # Solve FEM
     voxels = grid.getVoxels()
     import femsolver, femplotter, time
+    forward_pass(voxels)
+
+    return
 
     E = 200e9  # Young's modulus (Pa)
     nu = 0.3   # Poisson's ratio
