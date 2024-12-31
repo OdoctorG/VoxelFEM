@@ -10,7 +10,7 @@ import matplotlib.style as mplstyle
 mplstyle.use('fast')
 
 def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
-            flip_y: bool = False, z_order=2) -> plt.Figure:
+            flip_y: bool = False, z_order=2, opacity:float = 1.0, color: str = "black") -> plt.Figure:
     """
     Plot a 2D mesh given the voxel representation of the geometry.
 
@@ -32,6 +32,8 @@ def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray =
     plt.Figure
         If new_figure is true, return the new figure. Otherwise, return None.
     """
+    plt.axis('equal')
+    
     if new_figure:
         fig = plt.figure()
     for i in range(voxels.shape[0]):
@@ -39,13 +41,14 @@ def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray =
             if voxels[i, j] == 1:
                 for k in [[0,1,0,0],[0,0,0,1],[1,1,0,1],[0,1,1,1]]:
                     if flip_y:
-                        plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [-i+k[2]+offset[1], -i+k[3]+offset[1]], color="black", zorder=z_order)
+                        plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [-i+k[2]+offset[1], -i+k[3]+offset[1]], color=color, zorder=z_order, alpha=opacity)
                     else:
-                        plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [i+k[2]+offset[1], i+k[3]+offset[1]], color="black", zorder=z_order)
+                        plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [i+k[2]+offset[1], i+k[3]+offset[1]], color=color,zorder=z_order, alpha=opacity)
     if new_figure:
         return fig
     else:
         return None
+    
 
 def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, auto_scale: bool = True, new_figure: bool = False, offset: np.ndarray = np.array([0, 0]),
                 z_order=2) -> plt.Figure:
@@ -102,6 +105,7 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
                     plt.plot(line[0], line[1], color="black", zorder=z_order)
     
     ax = fig.axes
+    plt.axis('equal')
     plt.title("Deformed mesh, Scale Factor = {:.2E}".format(scale))
     ax[0].invert_yaxis()
     if new_figure:
@@ -148,6 +152,7 @@ def node_vector_plot(vals: np.ndarray, voxels: np.ndarray, scale: float =10e9, a
                     zorder=3)
     fig.axes[0].invert_yaxis()
     plt.title("Deformed mesh, Scale Factor = {:.2E}".format(scale))
+    plt.axis('equal')
     plot_mesh(voxels)
     return fig
 def node_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
@@ -192,5 +197,6 @@ def node_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
                 plt.pcolormesh(X*0.5+0.5+j, Y*(0.5)+0.5+i, result, cmap='viridis', norm=norm, shading='gouraud')
     plt.colorbar()
     fig.axes[0].invert_yaxis()
+    plt.axis('equal')
     plot_mesh(voxels)
     return fig

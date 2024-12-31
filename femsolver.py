@@ -1,6 +1,5 @@
 import math
 import numpy as np
-import pyamg
 import scipy.sparse
 import scipy.sparse.linalg
 import time
@@ -238,9 +237,10 @@ def get_voxel_values(node_values, voxels):
             if voxels[i, j] == 1:
                 nodes = coord_to_nodes(i, j, voxels.shape[1])
                 mean = 0
+                vals = [node_values[n] for n in nodes]
                 for n in nodes:
                     mean += node_values[n]
-                voxel_values[i, j] = mean/len(nodes)
+                voxel_values[i, j] = np.max(vals)#mean/len(nodes)
     
     return voxel_values
 
@@ -383,7 +383,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
 
 def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
-    Add a force to a node in the force vector F.
+    Add a force to a node.
 
     Parameters
     ----------
@@ -404,6 +404,43 @@ def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     F[node_idx*2+1] = force[1]
     return F
 
+def add_force_to_voxel(i, j, width, F: np.ndarray, force: np.ndarray) -> np.ndarray:
+    """
+    Distribute a force over a voxel.
+    """
+    nodes = coord_to_nodes(i, j, width)
+    for node in nodes:
+        F[node*2] = force[0]/4
+        F[node*2+1] = force[1]/4
+
+    return F
+
+
+def add_force_to_nodes(node_indices, F: np.ndarray, force: np.ndarray) -> np.ndarray:
+    """
+    Distribute a force over multiple nodes.
+    
+    Parameters
+    ----------
+    node_indices : int
+        Node indices to add the force to.
+    F : np.ndarray
+        Force vector to add the force to.
+    force : np.ndarray
+        Force vector to add to the node.
+
+    Returns
+    -------
+    F : np.ndarray
+        Updated force vector.
+    """
+
+    for node_idx in node_indices:
+        F[node_idx*2] = force[0]/len(node_indices)
+        F[node_idx*2+1] = force[1]/len(node_indices)
+    
+    return F
+
 def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
     dof_indices = np.array([node_idx*2 for node_idx in node_indices] + [node_idx*2+1 for node_idx in node_indices])
     new_K = K.copy().tolil()
@@ -417,6 +454,36 @@ def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) 
 
     return new_K.tocsr(), F
 
+def fix_boundary_nodes2(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray]:
+    # Degrees of freedom indices
+    dof_indices = np.array([node_idx * 2 for node_idx in node_indices] + [node_idx * 2 + 1 for node_idx in node_indices])
+    
+    # Compute the mean of diagonal elements
+    Kdiag = np.mean(K.diagonal())
+    
+    # Create a copy of the diagonal
+    diag = K.diagonal()
+    
+    # Update the diagonal for the specified DOF indices
+    diag[dof_indices] = Kdiag
+    
+    # Create a mask for rows/columns to zero out
+    mask = np.zeros(K.shape[0], dtype=bool)
+    mask[dof_indices] = True
+    
+    # Zero out the corresponding rows and columns
+    newK = K.tolil()
+    newK[mask, :] = 0
+    newK[:, mask] = 0
+    
+    # Set the updated diagonal
+    newK.setdiag(diag)
+    
+    # Zero out the corresponding entries in F
+    F[dof_indices] = 0
+    
+    return newK.tocsr(), F
+
 
 def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
     null_nodes = K.diagonal() == 0
@@ -426,8 +493,19 @@ def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.spa
     F = F[keep_nodes]
 
     return K, F, np.where(null_nodes)[0]
+def condition(K: scipy.sparse.csr_matrix) -> float:
+    w = scipy.sparse.linalg.eigsh(K, k=1, which='LM', return_eigenvectors=False)
+    w2 = scipy.sparse.linalg.eigsh(K, k=1, which='SM', return_eigenvectors=False)
+    return (np.abs(w)/np.abs(w2))[0]
 
-def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: bool = False) -> np.ndarray:
+def condition2(K: scipy.sparse.csr_matrix) -> float:
+    n_components, labels = scipy.sparse.csgraph.connected_components(K, directed=False)
+    print("Number of components: ", n_components)
+    if n_components <= 89:
+        return 1
+    return 2e12
+
+def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: bool = False, max_cond: float = 1e12) -> np.ndarray:
     """
     Solve the linear system K @ u = F, subject to displacement boundary conditions.
 
@@ -448,16 +526,52 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
 
     
     pret1 = time.perf_counter()
-    K_red, F_red = fix_boundary_nodes(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
+    K_red, F_red = fix_boundary_nodes2(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
     K_red, F_red, null_nodes = fix_null_nodes(K_red, F_red) # Remove null nodes (unconnected nodes)
+    
+    pret2 = time.perf_counter()
+    if debug:
+        print(f"Preprocessing took {pret2-pret1} seconds")
+    
+    cond1 = time.perf_counter()
+    cond = 1#condition(K_red.tocsr())
+    print(f"Condition number: {cond}")
+    cond2 = time.perf_counter()
+    if debug:
+        print(f"Condition check took {cond2-cond1} seconds")
+    if max_cond != None and cond > max_cond:
+        print("Condition number too high!")
+        return None, None
+    
+    t1 = time.perf_counter()
+    
+    u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
+    t2 = time.perf_counter()
+
+    if debug: 
+        t3 = time.perf_counter()
+
+        print(f"Solved in {t2-t1} seconds using spsolve")
+        print(f"Solved in {t3-t2} seconds using smoothed_aggregation_solver")
+
+    u = u_red
+
+    for i in range(len(null_nodes)): # Add back null nodes
+        u = np.insert(u, null_nodes[i], 0, axis=0)
+    
+    return u, cond
+
+def quick_solve(K: scipy.sparse.csr_matrix, F: np.ndarray, debug: bool = False) -> np.ndarray:
+    pret1 = time.perf_counter()
+    K_red, F_red, null_nodes = fix_null_nodes(K, F) # Remove null nodes (unconnected nodes)
     
     #print(len(null_nodes))
     pret2 = time.perf_counter()
     if debug:
         print(f"Preprocessing took {pret2-pret1} seconds")
-
+    
     t1 = time.perf_counter()
-    print(np.linalg.cond(K_red.toarray()))
+    
     u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
     t2 = time.perf_counter()
 
@@ -474,7 +588,7 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     for i in range(len(null_nodes)): # Add back null nodes
         u = np.insert(u, null_nodes[i], 0, axis=0)
     
-    return u
+    return u, 1
 
 def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
     new_voxels = np.zeros((factor*voxels.shape[0], factor*voxels.shape[1]))
@@ -518,7 +632,7 @@ def test():
     t2 = time.perf_counter_ns()
 
     # Solve displacements (and add boundary conditions)
-    u = solve(K, F, [5, 20, 21, 22, 23, 24], debug=True)
+    u, _ = solve(K, F, [5, 20, 21, 22, 23, 24], debug=True)
 
     t3 = time.perf_counter_ns()
 
