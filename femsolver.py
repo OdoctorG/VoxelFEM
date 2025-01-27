@@ -1,5 +1,6 @@
 import math
 import numpy as np
+import scipy.signal
 import scipy.sparse
 import scipy.sparse.linalg
 import time
@@ -22,7 +23,7 @@ N₄ = (1 + ξ)(1 + η) / 4
 
 
 # Number of Gauss points, if set to 1 you get very bad results. 2 and up recommended
-NGAUSS = 2
+NGAUSS = 3
 
 def B_matrix(xi, eta, L):
     """
@@ -505,7 +506,14 @@ def condition2(K: scipy.sparse.csr_matrix) -> float:
         return 1
     return 2e12
 
-def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: bool = False, max_cond: float = 1e12) -> np.ndarray:
+
+def is_connected(matrix):
+
+    n_components, _ = scipy.sparse.csgraph.connected_components(matrix)  # Find connected components
+
+    return n_components  # If only one component, graph is connected
+
+def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: bool = False) -> np.ndarray:
     """
     Solve the linear system K @ u = F, subject to displacement boundary conditions.
 
@@ -528,20 +536,25 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     pret1 = time.perf_counter()
     K_red, F_red = fix_boundary_nodes2(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
     K_red, F_red, null_nodes = fix_null_nodes(K_red, F_red) # Remove null nodes (unconnected nodes)
-    
+    compt1 = time.perf_counter()
+    components = is_connected(K_red)
+    compt2 = time.perf_counter()
+    print(components, " Components")
+    print(f"Calculating components took {compt2-compt1} seconds")
+
     pret2 = time.perf_counter()
     if debug:
         print(f"Preprocessing took {pret2-pret1} seconds")
     
-    cond1 = time.perf_counter()
-    cond = 1#condition(K_red.tocsr())
-    print(f"Condition number: {cond}")
-    cond2 = time.perf_counter()
-    if debug:
-        print(f"Condition check took {cond2-cond1} seconds")
-    if max_cond != None and cond > max_cond:
-        print("Condition number too high!")
-        return None, None
+    #cond1 = time.perf_counter()
+    #cond = 1#condition(K_red.tocsr())
+    #print(f"Condition number: {cond}")
+    #cond2 = time.perf_counter()
+    #if debug:
+    #    print(f"Condition check took {cond2-cond1} seconds")
+    #if max_cond != None and cond > max_cond:
+    #    print("Condition number too high!")
+    #    return None, None
     
     t1 = time.perf_counter()
     
@@ -559,7 +572,7 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     for i in range(len(null_nodes)): # Add back null nodes
         u = np.insert(u, null_nodes[i], 0, axis=0)
     
-    return u, cond
+    return u, components
 
 def quick_solve(K: scipy.sparse.csr_matrix, F: np.ndarray, debug: bool = False) -> np.ndarray:
     pret1 = time.perf_counter()
@@ -593,11 +606,27 @@ def quick_solve(K: scipy.sparse.csr_matrix, F: np.ndarray, debug: bool = False) 
 def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
     new_voxels = np.zeros((factor*voxels.shape[0], factor*voxels.shape[1]))
 
+    # Sub divide
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
             if (voxels[i,j] == 1):
                 new_voxels[i*factor:(i+1)*factor, j*factor:(j+1)*factor] = 1
     
+    # Rounding corners
+    bot_right = [[0, 1, 0], [1, -1, -1], [0, -1, 0]]
+    bot_left = [[0, 1, 0], [-1, -1, 1], [0, -1, 0]]
+    top_right = [[0, -1, 0], [1, -1, -1], [0, 1, 0]]
+    top_left = [[0, -1, 0], [-1, -1, 1], [0, 1, 0]]
+
+    #br
+    br = scipy.signal.convolve2d(new_voxels, bot_right, mode='same', boundary='fill', fillvalue=0)==2
+    #bl
+    bl = scipy.signal.convolve2d(new_voxels, bot_left, mode='same', boundary='fill', fillvalue=0)==2
+    #tr
+    tr = scipy.signal.convolve2d(new_voxels, top_right, mode='same', boundary='fill', fillvalue=0)==2
+    #tl
+    tl = scipy.signal.convolve2d(new_voxels, top_left, mode='same', boundary='fill', fillvalue=0)==2
+    new_voxels = (new_voxels + br + bl + tr + tl) > 0
     return new_voxels
 
 def test():
