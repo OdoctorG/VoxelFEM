@@ -1,3 +1,5 @@
+""" Plotting functions for displaying the results of the FEM solver """
+
 import math
 import numpy as np
 import matplotlib.pyplot as plt
@@ -78,6 +80,7 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
         If new_figure is True, a new figure is created and returned. Otherwise, None is returned.
 
     """
+    print(voxels.shape)
     vector_lengths = [np.sqrt(u[i*2]**2 + u[i*2+1]**2) for i in range(len(u)//2)]
     if auto_scale:
         scale = 1/np.max(vector_lengths)
@@ -199,4 +202,26 @@ def node_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
     fig.axes[0].invert_yaxis()
     plt.axis('equal')
     plot_mesh(voxels)
+    return fig
+
+def fast_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
+    
+    fig = plt.figure()
+    norm = plt.Normalize(0.9*min(vals), max(vals)*4)
+    
+    # Vectorize the function
+    vectorized_compute_vector = np.vectorize(shape_function, signature='(),()->(n)')
+    image = np.zeros((voxels.shape[0], voxels.shape[1]))
+    for i in range(voxels.shape[0]):
+        for j in range(voxels.shape[1]):
+            if (voxels[i, j] == 1):
+                coord = coord_to_nodes(i, j, voxels.shape[1])
+                z = vals[coord[0]] + vals[coord[1]] + vals[coord[2]] + vals[coord[3]]
+                z *= 0.25
+                image[i, j] = z
+    
+    plt.imshow(image, cmap='viridis', norm=matplotlib.colors.LogNorm()) #, norm=matplotlib.colors.LogNorm()
+    plt.colorbar()
+    fig.axes[0].invert_yaxis()
+    plt.axis('equal')
     return fig
