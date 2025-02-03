@@ -1,9 +1,3 @@
-import math
-import numpy as np
-import scipy.signal
-import scipy.sparse
-import scipy.sparse.linalg
-import time
 """ 
 Voxel 2D FEM Solver 
 
@@ -14,12 +8,21 @@ N1 --- N2
 |       |
 N3 --- N4
 
+Form functions:
 N₁ = (1 - ξ)(1 - η) / 4
 N₂ = (1 + ξ)(1 - η) / 4
 N₃ = (1 - ξ)(1 + η) / 4
 N₄ = (1 + ξ)(1 + η) / 4
 
 """
+
+import math
+import numpy as np
+import scipy.signal
+import scipy.sparse
+import scipy.sparse.linalg
+import time
+
 
 
 # Number of Gauss points, if set to 1 you get very bad results. 2 and up recommended
@@ -179,6 +182,62 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
     return strains
 
 
+def get_element_strains_fast(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarray:
+    """
+    Compute strains at each Gauss point using vectorized operations.
+    
+    Parameters
+    ----------
+    u : np.ndarray
+        Nodal displacements (1D array).
+    voxels : np.ndarray
+        2D array indicating solid (1) and void (0) voxels.
+    L : float
+        Element side length.
+
+    Returns
+    -------
+    np.ndarray
+        Strains at each Gauss point (shape: [H*NGAUSS, W*NGAUSS, 3]).
+    """
+    H, W = voxels.shape
+    n_g = NGAUSS
+    gauss_p, w = gauss_points(n_g)
+    n_g_sq = n_g ** 2
+
+    # Precompute scaled B matrices for all Gauss points
+    B_scaled = np.zeros((n_g_sq, 3, 8))
+    for gp_idx in range(n_g_sq):
+        xi_idx, eta_idx = divmod(gp_idx, n_g)
+        xi = gauss_p[xi_idx]
+        eta = gauss_p[eta_idx]
+        B = B_matrix(xi, eta, L)
+        B_scaled[gp_idx] = B * (w[xi_idx] * w[eta_idx] * 0.25)  # Include weights and J
+
+    # Get solid element indices
+    solid_i, solid_j = np.where(voxels == 1)
+    n_solid = len(solid_i)
+    if n_solid == 0:
+        return np.zeros((H*n_g, W*n_g, 3))
+
+    # Get nodal DOF indices for all solid elements
+    nodes = coord_to_nodes_vectorized(solid_i, solid_j, W)
+    dof_indices = np.stack([2*nodes, 2*nodes+1], axis=2).reshape(n_solid, 8)
+    u_elements = u[dof_indices]  # Shape: (n_solid, 8)
+
+    # Compute all strains in one shot using Einstein summation
+    strains_all = np.einsum('gab,sb->sga', B_scaled, u_elements)  # Shape: (n_solid, n_g_sq, 3)
+
+    # Initialize output array and assign values
+    strains = np.zeros((H*n_g, W*n_g, 3))
+    for gp_idx in range(n_g_sq):
+        eta_idx, xi_idx = divmod(gp_idx, n_g)  # xi varies faster in original loop
+        rows = solid_i * n_g + eta_idx
+        cols = solid_j * n_g + xi_idx
+        strains[rows, cols, :] = strains_all[:, gp_idx, :]
+
+    return strains
+
 def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarray:
     """
     Compute the average strain/stress at each node in the mesh, given the strains/stresses at each gauss point in each element.
@@ -229,6 +288,54 @@ def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.n
     
     return strains
 
+def get_node_values_fast(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarray:
+    """
+    Compute the average strain/stress at each node in the mesh using vectorized operations.
+    """
+    H, W = voxels.shape
+    n_gauss = NGAUSS
+    n_gauss_sq = n_gauss ** 2
+
+    # Precompute shape functions for all Gauss points in correct xi/eta order
+    gauss_p = gauss_points(n_gauss)[0]
+    xi, eta = np.meshgrid(gauss_p, gauss_p, indexing='ij')  # xi varies first
+    xi = xi.flatten()  # Order: xi_0, xi_0, ..., xi_1, ...
+    eta = eta.flatten()
+    N = np.array([shape_function(xi_, eta_) for xi_, eta_ in zip(xi, eta)])  # (n_gauss_sq, 4)
+
+    # Reshape element_s to (H, W, n_gauss, n_gauss, 3) with xi first
+    element_s_4d = element_s.reshape(H, n_gauss, W, n_gauss, 3).transpose(0, 2, 3, 1, 4)
+    # Now element_s_4d[i,j] is (n_gauss_xi, n_gauss_eta, 3)
+
+    # Get indices of solid elements
+    solid_i, solid_j = np.where(voxels == 1)
+    num_solid = len(solid_i)
+    if num_solid == 0:
+        return np.zeros(((H + 1) * (W + 1), 3))
+
+    # Extract strains for all Gauss points in correct xi/eta order
+    all_strains = element_s_4d[solid_i, solid_j, :, :, :].reshape(-1, 3)  # (num_solid * n_gauss_sq, 3)
+
+    # Compute node indices for all solid elements
+    nodes = coord_to_nodes_vectorized(solid_i, solid_j, W)
+
+    # Expand nodes to match Gauss points and accumulate
+    nodes_repeated = nodes.repeat(n_gauss_sq, axis=0)  # (num_solid * n_gauss_sq, 4)
+    N_tiled = np.tile(N, (num_solid, 1))  # (num_solid * n_gauss_sq, 4)
+
+    # Initialize strains array
+    strains = np.zeros(((H + 1) * (W + 1), 3))
+    
+    # Accumulate contributions using vectorized operations
+    for k in range(4):  # For each node in the element
+        node_indices = nodes_repeated[:, k]
+        weights = N_tiled[:, k]
+        # Vectorized: strains[node_indices] += weights[:, None] * all_strains
+        for l in range(3):  # For each strain component
+            np.add.at(strains[:, l], node_indices, weights * all_strains[:, l])
+
+    return strains
+
 def get_voxel_values(node_values, voxels):
     # Average over the node value of each corner in each voxel
     # TODO: change to integrate over the gauss points inside the voxel instead.
@@ -244,6 +351,20 @@ def get_voxel_values(node_values, voxels):
                 voxel_values[i, j] = np.max(vals)#mean/len(nodes)
     
     return voxel_values
+
+def get_voxel_values_fast(node_values, voxels):
+    # Width
+    W = voxels.shape[1]
+    # Get indices of solid elements
+    solid_i, solid_j = np.where(voxels == 1)
+    nodes = coord_to_nodes_vectorized(solid_i, solid_j, W)
+
+    voxel_values = np.zeros((voxels.shape[0], voxels.shape[1]))
+    voxel_values[solid_i, solid_j] = np.max(node_values[nodes], axis=1) # Use max
+    # voxel_values[solid_i, solid_j] = np.mean(node_vals, axis=1)  # Use mean
+
+    return voxel_values
+
 
 def get_element_stresses(element_strains: np.ndarray, E: float, nu: float) -> np.ndarray:
     """
@@ -274,28 +395,35 @@ def get_element_stresses(element_strains: np.ndarray, E: float, nu: float) -> np
 
     return stresses
 
-def von_mises_stresses(stresses: np.ndarray) -> np.ndarray:
+def get_element_stresses_fast(element_strains: np.ndarray, E: float, nu: float) -> np.ndarray:
     """
-    Compute von Mises stresses from stress tensor at each  element.
+    Compute stresses at each Gauss point using vectorized operations.
+    Optimized for speed by precomputing the material property matrix.
 
     Parameters
     ----------
-    stresses : np.ndarray
-        Stresses at each element.
+    element_strains : np.ndarray
+        Strains at each Gauss point (shape: [H*NGAUSS, W*NGAUSS, 3]).
+    E : float
+        Young's modulus.
+    nu : float
+        Poisson's ratio.
 
     Returns
     -------
     np.ndarray
-        von Mises stresses at each element.
+        Stresses at each Gauss point (shape: [H*NGAUSS, W*NGAUSS, 3]).
     """
-    von_mises = np.zeros((stresses.shape[0], stresses.shape[1]))
+    # Precompute material property matrix for plane stress
+    D = (E / (1 - nu**2)) * np.array([[1, nu, 0],
+                                      [nu, 1, 0],
+                                      [0, 0, (1-nu)/2]])
 
-    # Compute von Mises stresses
-    for i in range(stresses.shape[0]):
-        for j in range(stresses.shape[1]):
-            von_mises[i,j] = np.sqrt(np.square(stresses[i,j][0]) + np.square(stresses[i,j][1]) - stresses[i,j][0] * stresses[i,j][1] + 3*np.square(stresses[i,j][2]))
+    # Vectorized computation of stresses
+    stresses = np.einsum('...ij,jk->...ik', element_strains, D)
 
-    return von_mises
+    return stresses
+
 
 def von_mises_stresses_node(stresses: np.ndarray) -> np.ndarray:
     """
@@ -311,11 +439,15 @@ def von_mises_stresses_node(stresses: np.ndarray) -> np.ndarray:
     np.ndarray
         von Mises stresses at each node.
     """
-    von_mises = np.zeros(stresses.shape[0])
+    # Extract stress components
+    sigma_x = stresses[:, 0]
+    sigma_y = stresses[:, 1]
+    tau_xy = stresses[:, 2]
 
-    # Compute von Mises stresses
-    for i in range(stresses.shape[0]):
-        von_mises[i] = np.sqrt(np.square(stresses[i][0]) + np.square(stresses[i][1]) - stresses[i][0] * stresses[i][1] + 3*np.square(stresses[i][2]))
+    # Compute von Mises stresses in a vectorized manner
+    von_mises = np.sqrt(
+        sigma_x**2 + sigma_y**2 - sigma_x * sigma_y + 3 * tau_xy**2
+    )
 
     return von_mises
 
@@ -323,6 +455,16 @@ def von_mises_stresses_node(stresses: np.ndarray) -> np.ndarray:
 def coord_to_nodes(i,j, width) -> tuple[int, int, int, int]:
     """Convert voxel coordinates to node indices"""
     return (i*(width+1)+j, i*(width+1)+j+1, (i+1)*(width+1)+j, (i+1)*(width+1)+j+1)
+
+def coord_to_nodes_vectorized(i: np.ndarray, j: np.ndarray, width: int) -> np.ndarray:
+    """Vectorized computation of node indices for given voxel coordinates."""
+    nodes = np.empty((len(i), 4), dtype=int)
+    nodes[:, 0] = i * (width + 1) + j
+    nodes[:, 1] = i * (width + 1) + j + 1
+    nodes[:, 2] = (i + 1) * (width + 1) + j
+    nodes[:, 3] = (i + 1) * (width + 1) + j + 1
+    return nodes
+
 
 def nodes_to_coord(node_idx, width) -> tuple[int, int]:
     """Convert node indices to voxel coordinates"""
@@ -380,7 +522,85 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
 
     # Assemble sparse matrix
     K = scipy.sparse.csr_matrix((data, (row_indices, col_indices)), shape=(n_dofs, n_dofs))
+    K.eliminate_zeros()
     return K
+
+def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: np.ndarray, new_voxels: np.ndarray, Ke: np.ndarray, threshold: float) -> scipy.sparse.csr_matrix:
+    """
+    Efficiently update the global stiffness matrix for a new voxel configuration by adding/removing contributions from changed elements.
+
+    Parameters
+    ----------
+    K_old : scipy.sparse.csr_matrix
+        The previous global stiffness matrix.
+    old_voxels : np.ndarray
+        2D array of the previous voxel configuration (1 = solid, 0 = void).
+    new_voxels : np.ndarray
+        2D array of the updated voxel configuration (1 = solid, 0 = void).
+    Ke : np.ndarray
+        The 8x8 element stiffness matrix (assumed uniform for all elements).
+    threshold : float
+        The threshold for determining if an element has changed.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The updated global stiffness matrix.
+    """
+    width = new_voxels.shape[1]
+
+    # Determine which voxels have been added or removed
+    added = np.logical_and(new_voxels == 1, old_voxels == 0)
+    removed = np.logical_and(new_voxels == 0, old_voxels == 1)
+
+    print("Added:", np.sum(added), "Removed:", np.sum(removed))
+
+    # Collect data for delta matrix (changes to apply)
+    delta_data = []
+    delta_rows = []
+    delta_cols = []
+
+    # Process added voxels: add their Ke contributions
+    added_indices = np.argwhere(added)
+    for i, j in added_indices:
+        nodes = coord_to_nodes(i, j, width)
+        for local_i in range(8):
+            global_i = nodes[local_i // 2] * 2 + (local_i % 2)
+            for local_j in range(8):
+                global_j = nodes[local_j // 2] * 2 + (local_j % 2)
+                delta_data.append(Ke[local_i, local_j])
+                delta_rows.append(global_i)
+                delta_cols.append(global_j)
+
+    # Process removed voxels: subtract their Ke contributions
+    removed_indices = np.argwhere(removed)
+    for i, j in removed_indices:
+        nodes = coord_to_nodes(i, j, width)
+        for local_i in range(8):
+            global_i = nodes[local_i // 2] * 2 + (local_i % 2)
+            for local_j in range(8):
+                global_j = nodes[local_j // 2] * 2 + (local_j % 2)
+                delta_data.append(-Ke[local_i, local_j])
+                delta_rows.append(global_i)
+                delta_cols.append(global_j)
+
+    # Create delta matrix in COO format
+    n_dofs = K_old.shape[0]
+    delta_matrix = scipy.sparse.csr_matrix(
+        (delta_data, (delta_rows, delta_cols)),
+        shape=(n_dofs, n_dofs)
+    )  # Convert to CSR for efficient arithmetic
+
+    # Update the global stiffness matrix
+    K_new = K_old + delta_matrix
+    
+    # Round small values to zero to improve numerical stability
+    K_new.data[np.abs(K_new.data) < threshold] = 0
+    K_new.eliminate_zeros()  # Remove explicit zeros from the matrix
+
+    return K_new
+
+
 
 def add_force_to_node(node_idx, F: np.ndarray, force: np.ndarray) -> np.ndarray:
     """
@@ -442,27 +662,14 @@ def add_force_to_nodes(node_indices, F: np.ndarray, force: np.ndarray) -> np.nda
     
     return F
 
-def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
-    dof_indices = np.array([node_idx*2 for node_idx in node_indices] + [node_idx*2+1 for node_idx in node_indices])
-    new_K = K.copy().tolil()
-    # Sum of diagonal elements
-    Kdiag = np.mean(K.diagonal())
-    for dof in dof_indices:
-        new_K[dof, :] = 0
-        new_K[:, dof] = 0
-        new_K[dof, dof] = Kdiag
-        F[dof] = 0
+def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray]:
+    # Apply boundary conditions to K and F - Fairly fast implementation (help from ChatGPT)
 
-    return new_K.tocsr(), F
-
-def fix_boundary_nodes2(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray]:
     # Degrees of freedom indices
     dof_indices = np.array([node_idx * 2 for node_idx in node_indices] + [node_idx * 2 + 1 for node_idx in node_indices])
     
     # Compute the mean of diagonal elements
     Kdiag = np.mean(K.diagonal())
-    
-    # Create a copy of the diagonal
     diag = K.diagonal()
     
     # Update the diagonal for the specified DOF indices
@@ -486,7 +693,45 @@ def fix_boundary_nodes2(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray)
     return newK.tocsr(), F
 
 
+def fix_boundary_nodes_fast(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray]:
+    # Vectorize DOF indices calculation.
+    node_indices = np.asarray(node_indices)
+    dof_indices = np.concatenate([node_indices * 2, node_indices * 2 + 1])
+    
+    # Cache the diagonal and compute its mean.
+    diag = K.diagonal().copy()
+    Kdiag = diag.mean()
+    diag[dof_indices] = Kdiag
+    
+    # Convert to COO so we can filter out entries in boundary rows/columns.
+    K_coo = K.tocoo()
+    
+    # Create a mask to keep only those entries whose row AND column are *not*
+    # boundary DOFs.
+    mask = ~np.logical_or(np.isin(K_coo.row, dof_indices),
+                          np.isin(K_coo.col, dof_indices))
+    
+    # Build a new COO matrix with only the filtered entries.
+    new_coo = scipy.sparse.coo_matrix(
+        (K_coo.data[mask], (K_coo.row[mask], K_coo.col[mask])), shape=K.shape
+    )
+    newK = new_coo.tocsr()
+    
+    # At this point, many rows corresponding to boundary DOFs may have no stored
+    # diagonal entry. To be sure that the new diagonal is exactly what we want,
+    # we remove any existing diagonal and add a fresh diagonal.
+    # Subtract any existing diagonal:
+    newK = newK - scipy.sparse.diags(newK.diagonal(), shape=K.shape, format='csr')
+    # Add the new diagonal.
+    newK = newK + scipy.sparse.diags(diag, shape=K.shape, format='csr')
+    
+    # Zero out the corresponding entries in F.
+    F[dof_indices] = 0
+    
+    return newK, F
+
 def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray, list]:
+    # Fix null/zero nodes of K and F
     null_nodes = K.diagonal() == 0
     keep_nodes = ~null_nodes
 
@@ -494,21 +739,9 @@ def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.spa
     F = F[keep_nodes]
 
     return K, F, np.where(null_nodes)[0]
-def condition(K: scipy.sparse.csr_matrix) -> float:
-    w = scipy.sparse.linalg.eigsh(K, k=1, which='LM', return_eigenvectors=False)
-    w2 = scipy.sparse.linalg.eigsh(K, k=1, which='SM', return_eigenvectors=False)
-    return (np.abs(w)/np.abs(w2))[0]
 
-def condition2(K: scipy.sparse.csr_matrix) -> float:
-    n_components, labels = scipy.sparse.csgraph.connected_components(K, directed=False)
-    print("Number of components: ", n_components)
-    if n_components <= 89:
-        return 1
-    return 2e12
-
-
-def is_connected(matrix):
-
+def n_components(matrix):
+    # Number of components in the graph rep. of matrix
     n_components, _ = scipy.sparse.csgraph.connected_components(matrix)  # Find connected components
 
     return n_components  # If only one component, graph is connected
@@ -530,14 +763,16 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     -------
     u : np.ndarray
         Solution vector with displacements at each node.
+    components : int
+        Number of connected components in the graph.
     """
-
-    
+    # Apply boundary conditions and solve the linear system and 
+    ## TODO improve performance of fixing boundary nodes - perhaps by reusing K_red from previous iteration
     pret1 = time.perf_counter()
-    K_red, F_red = fix_boundary_nodes2(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
+    K_red, F_red = fix_boundary_nodes(fixed_nodes, K, F) # Remove fixed nodes (zero displacements)
     K_red, F_red, null_nodes = fix_null_nodes(K_red, F_red) # Remove null nodes (unconnected nodes)
     compt1 = time.perf_counter()
-    components = is_connected(K_red)
+    components = n_components(K_red)
     compt2 = time.perf_counter()
     print(components, " Components")
     print(f"Calculating components took {compt2-compt1} seconds")
@@ -546,26 +781,12 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     if debug:
         print(f"Preprocessing took {pret2-pret1} seconds")
     
-    #cond1 = time.perf_counter()
-    #cond = 1#condition(K_red.tocsr())
-    #print(f"Condition number: {cond}")
-    #cond2 = time.perf_counter()
-    #if debug:
-    #    print(f"Condition check took {cond2-cond1} seconds")
-    #if max_cond != None and cond > max_cond:
-    #    print("Condition number too high!")
-    #    return None, None
-    
     t1 = time.perf_counter()
-    
     u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
     t2 = time.perf_counter()
 
     if debug: 
-        t3 = time.perf_counter()
-
         print(f"Solved in {t2-t1} seconds using spsolve")
-        print(f"Solved in {t3-t2} seconds using smoothed_aggregation_solver")
 
     u = u_red
 
@@ -576,8 +797,13 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
 
 def quick_solve(K: scipy.sparse.csr_matrix, F: np.ndarray, debug: bool = False) -> np.ndarray:
     pret1 = time.perf_counter()
+    #K_red, F_red = K, F
     K_red, F_red, null_nodes = fix_null_nodes(K, F) # Remove null nodes (unconnected nodes)
-    
+    compt1 = time.perf_counter()
+    components = n_components(K_red)
+    compt2 = time.perf_counter()
+    print(components, " Components")
+    print(f"Calculating components took {compt2-compt1} seconds")
     #print(len(null_nodes))
     pret2 = time.perf_counter()
     if debug:
@@ -601,18 +827,18 @@ def quick_solve(K: scipy.sparse.csr_matrix, F: np.ndarray, debug: bool = False) 
     for i in range(len(null_nodes)): # Add back null nodes
         u = np.insert(u, null_nodes[i], 0, axis=0)
     
-    return u, 1
+    return u, components
 
 def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
     new_voxels = np.zeros((factor*voxels.shape[0], factor*voxels.shape[1]))
 
-    # Sub divide
+    # Sub divide voxels
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
             if (voxels[i,j] == 1):
                 new_voxels[i*factor:(i+1)*factor, j*factor:(j+1)*factor] = 1
     
-    # Rounding corners
+    # Round corners with use of 2D convolution
     bot_right = [[0, 1, 0], [1, -1, -1], [0, -1, 0]]
     bot_left = [[0, 1, 0], [-1, -1, 1], [0, -1, 0]]
     top_right = [[0, -1, 0], [1, -1, -1], [0, 1, 0]]
@@ -626,6 +852,7 @@ def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
     tr = scipy.signal.convolve2d(new_voxels, top_right, mode='same', boundary='fill', fillvalue=0)==2
     #tl
     tl = scipy.signal.convolve2d(new_voxels, top_left, mode='same', boundary='fill', fillvalue=0)==2
+
     new_voxels = (new_voxels + br + bl + tr + tl) > 0
     return new_voxels
 
@@ -640,7 +867,7 @@ def test():
     L = 0.01    # Side length (m)
     t = 0.1   # Thickness (m)
     
-    t1 = time.perf_counter_ns()
+    t1 = time.perf_counter()
 
     Ke = element_stiffness_matrix(E, nu, L, t)
 
@@ -658,30 +885,41 @@ def test():
     F = np.zeros((n_dofs, 1))
     F = add_force_to_node(4, F, np.array([0.5, 0.5]))
 
-    t2 = time.perf_counter_ns()
+    t2 = time.perf_counter()
+
+    new_voxels = voxels.copy()
+    new_voxels[1,1] = 0
+    new_voxels[2,1] = 0
+    print(K)
+    tu1 = time.perf_counter()
+    
+    K_red, F_red = fix_boundary_nodes([5, 20, 21, 22, 23, 24], K, F) # Remove fixed nodes (zero displacements)
+    #K_red, F_red = update_stiffness(K_red, F_red, new_voxels)
+
+    tu2 = time.perf_counter()
 
     # Solve displacements (and add boundary conditions)
-    u, _ = solve(K, F, [5, 20, 21, 22, 23, 24], debug=True)
-
-    t3 = time.perf_counter_ns()
+    u, _ = quick_solve(K_red, F_red, debug=True)
+    t3 = time.perf_counter()
 
     print("Time to setup system: ", (t2-t1))
+    print("Time to update system: ", (tu2-tu1))
     print("Time to solve system: ", (t3-t2))
 
     # Plot the displacements
-    vector_figure = femplotter.node_vector_plot(u, voxels)
+    vector_figure = femplotter.node_vector_plot(u, new_voxels)
     vector_figure.suptitle("Displacements")
-    femplotter.plot_displaced_mesh(u, voxels, new_figure=True)
+    femplotter.plot_displaced_mesh(u, new_voxels, new_figure=True)
 
     # Compute stresses and strains
-    eps = get_element_strains(u, voxels, L)
+    eps = get_element_strains(u, new_voxels, L)
     sigma = get_element_stresses(eps, E, nu)
-    n_eps = get_node_values(eps, voxels, L)
-    n_sigma = get_node_values(sigma, voxels, L)
+    n_eps = get_node_values(eps, new_voxels, L)
+    n_sigma = get_node_values(sigma, new_voxels, L)
 
     # Plot the von_mises stresses
     von_mises = von_mises_stresses_node(n_sigma)
-    von_mises_figure = femplotter.node_value_plot(von_mises, voxels)
+    von_mises_figure = femplotter.node_value_plot(von_mises, new_voxels)
     von_mises_figure.suptitle("von Mises stresses")
     plt.show()
 
