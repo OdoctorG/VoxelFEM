@@ -23,3 +23,5 @@ Now instead, consider a bridge which is fixed on both sides with an even loading
 ![Bridge problem](images/bridge_problem.png)
 The optimizer then gives this cool looking bridge:
 ![Bridge solution](images/optimized_bridge.png)
+If we just slightly change the problem setup and hyperparameters we instead get this bridge:
+![Bridge solution](images/optimized_bridge3.png)
