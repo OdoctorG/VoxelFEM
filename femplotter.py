@@ -222,6 +222,6 @@ def fast_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
     
     plt.imshow(image, cmap='viridis', norm=matplotlib.colors.LogNorm()) #, norm=matplotlib.colors.LogNorm()
     plt.colorbar()
-    fig.axes[0].invert_yaxis()
+    #fig.axes[0].invert_yaxis()
     plt.axis('equal')
     return fig
