@@ -23,10 +23,12 @@ import scipy.sparse
 import scipy.sparse.linalg
 import time
 
-
+import os
+os.add_dll_directory("C://Users/greno/miniforge3/Library/bin")
+from sksparse.cholmod import cholesky
 
 # Number of Gauss points, if set to 1 you get very bad results. 2 and up recommended
-NGAUSS = 3
+NGAUSS = 2
 
 def B_matrix(xi, eta, L):
     """
@@ -525,7 +527,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
     K.eliminate_zeros()
     return K
 
-def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: np.ndarray, new_voxels: np.ndarray, Ke: np.ndarray, threshold: float) -> scipy.sparse.csr_matrix:
+def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: np.ndarray, new_voxels: np.ndarray, Ke: np.ndarray, threshold: float) -> tuple[scipy.sparse.csr_matrix, scipy.sparse.csr_matrix]:
     """
     Efficiently update the global stiffness matrix for a new voxel configuration by adding/removing contributions from changed elements.
 
@@ -591,6 +593,7 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
         shape=(n_dofs, n_dofs)
     )  # Convert to CSR for efficient arithmetic
 
+    print("non-zero elements in delta matrix: ", delta_matrix.nnz)
     # Update the global stiffness matrix
     K_new = K_old + delta_matrix
     
@@ -598,7 +601,7 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
     K_new.data[np.abs(K_new.data) < threshold] = 0
     K_new.eliminate_zeros()  # Remove explicit zeros from the matrix
 
-    return K_new
+    return K_new, delta_matrix
 
 
 
@@ -795,39 +798,134 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     
     return u, components
 
-def quick_solve(K: scipy.sparse.csr_matrix, F: np.ndarray, debug: bool = False) -> np.ndarray:
-    pret1 = time.perf_counter()
-    #K_red, F_red = K, F
-    K_red, F_red, null_nodes = fix_null_nodes(K, F) # Remove null nodes (unconnected nodes)
-    compt1 = time.perf_counter()
-    components = n_components(K_red)
-    compt2 = time.perf_counter()
-    print(components, " Components")
-    print(f"Calculating components took {compt2-compt1} seconds")
-    #print(len(null_nodes))
-    pret2 = time.perf_counter()
-    if debug:
-        print(f"Preprocessing took {pret2-pret1} seconds")
+def get_B_matrix(F: np.ndarray) -> np.ndarray:
+    B = np.zeros((F.shape[0], 3))
+    B[0::2, 0] = 1
+    B[1::2, 1] = 1
+    B[0::2, 2] = -1
+    B[1::2, 2] = 1
+
+    return B
+
+import warnings
+
+class Solver:
+    factor = None
+
+    def __init__(self, K: scipy.sparse.csr_matrix, F: np.ndarray):
+        """
+        Initialize the Solver class.
+
+        Parameters
+        ----------
+        K : scipy.sparse.csr_matrix
+            Stiffness matrix.
+        F : np.ndarray
+            Force vector (not actually used)
+        """
+        K_red, F_red, null_nodes = fix_null_nodes(K, F)
+        self.K_red = K_red.tocsc()
+        self.factor = cholesky(K_red.tocsc())
+        self.threshold = 1e-10 * np.max(np.abs(K.data))
     
-    t1 = time.perf_counter()
-    
-    u_red = scipy.sparse.linalg.spsolve(K_red.tocsr(), F_red)
-    t2 = time.perf_counter()
+    def refactor(self, K: scipy.sparse.csr_matrix, remove_null_nodes=False):
+        """
+        Update the factorization of the stiffness matrix.
+        """
+        if remove_null_nodes:
+            K, _, null_nodes = fix_null_nodes(K, np.zeros(K.shape[0]))
 
-    if debug: 
-        #amg_solver = pyamg.ruge_stuben_solver(K_red.tocsr())
-        #u_red = amg_solver.solve(F_red)
-        t3 = time.perf_counter()
+        self.K_red = K.tocsc()
+        try:
+            self.factor = cholesky(K.tocsc(), ordering_method = "colamd")
+        except Exception as e:
+            self.factor = None
 
-        print(f"Solved in {t2-t1} seconds using spsolve")
-        print(f"Solved in {t3-t2} seconds using smoothed_aggregation_solver")
+    def solve(self, K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes, debug: bool = False) -> np.ndarray:
+        """
+        Solve the linear system K @ u = F, subject to displacement boundary conditions.
 
-    u = u_red
+        Parameters
+        ----------
+        K : scipy.sparse.csr_matrix
+            Stiffness matrix.
+        F : np.ndarray    
+            Force vector.
+        fixed_nodes : list
+            List of node indices with zero displacement.
 
-    for i in range(len(null_nodes)): # Add back null nodes
-        u = np.insert(u, null_nodes[i], 0, axis=0)
-    
-    return u, components
+        Returns
+        -------
+        u : np.ndarray
+            Solution vector with displacements at each node.
+        components : int
+            Number of connected components in the graph.
+        """
+        
+        t1 = time.perf_counter()
+        K, F = fix_boundary_nodes_fast(list(fixed_nodes), K, F)
+        t2 = time.perf_counter()
+
+        if debug:
+            print(f"Fixing boundary nodes took {t2-t1} seconds")
+
+        pret1 = time.perf_counter()
+        K.data[np.abs(K.data) < self.threshold] = 0
+        K.eliminate_zeros()
+        K_red, F_red, null_nodes = fix_null_nodes(K, F) # Remove null nodes (unconnected nodes)
+
+        compt1 = time.perf_counter()
+        components = n_components(K_red)
+        compt2 = time.perf_counter()
+
+        if debug:
+            print(components, " Components")
+            print(f"Calculating components took {compt2-compt1} seconds")
+        
+        pret2 = time.perf_counter()
+        if debug:
+            print(f"Preprocessing took {pret2-pret1} seconds")
+        
+        t1 = time.perf_counter()
+        self.refactor(K_red)
+
+        # If matrix is PSD we can use cholesky, otherwise use spsolve
+        if self.factor is None:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always", scipy.sparse.linalg.MatrixRankWarning)
+                #u_red = pypardiso.spsolve(K_red, F_red)
+                u_red = scipy.sparse.linalg.spsolve(K_red, F_red)
+                t2 = time.perf_counter()
+                if debug: 
+                    print(f"Solved in {t2-t1} seconds using spsolve")
+                
+                # Catch the case where the matrix is singular
+                if any(issubclass(warn.category, scipy.sparse.linalg.MatrixRankWarning) for warn in w):
+                    print("Matrix is singular - abort")
+                    return None, None
+        else:
+            u_red = np.squeeze(self.factor(F_red))
+            t2 = time.perf_counter()
+            if debug: 
+                print(f"Solved in {t2-t1} seconds using cholesky")
+
+        # Now we want to add back all the null nodes
+
+        # Create a boolean mask for all indices
+        mask = np.ones(len(u_red) + len(null_nodes), dtype=bool)
+
+        # Set False for null node indices
+        mask[null_nodes] = False
+
+        # Use the mask to insert zeros at null node positions
+        u_with_nulls = np.zeros((len(u_red) + len(null_nodes),), dtype=u_red.dtype)
+        u_with_nulls[mask] = u_red
+
+        # Replace the original 'u' with the new array containing null nodes
+        u = u_with_nulls
+        
+        return u, components
+
 
 def sub_divide(voxels: np.ndarray, factor: int) -> np.ndarray:
     new_voxels = np.zeros((factor*voxels.shape[0], factor*voxels.shape[1]))
@@ -875,6 +973,7 @@ def test():
     voxels = np.array([[0,1],
                     [1,1]])
     
+    # Subdivide
     voxels = sub_divide(voxels, 2)
 
     # Compute the global stiffness matrix
@@ -887,39 +986,28 @@ def test():
 
     t2 = time.perf_counter()
 
-    new_voxels = voxels.copy()
-    new_voxels[1,1] = 0
-    new_voxels[2,1] = 0
-    print(K)
-    tu1 = time.perf_counter()
-    
-    K_red, F_red = fix_boundary_nodes([5, 20, 21, 22, 23, 24], K, F) # Remove fixed nodes (zero displacements)
-    #K_red, F_red = update_stiffness(K_red, F_red, new_voxels)
-
-    tu2 = time.perf_counter()
-
     # Solve displacements (and add boundary conditions)
-    u, _ = quick_solve(K_red, F_red, debug=True)
+    solver = Solver(K, F)
+    u, _ = solver.solve(K, F, [5, 20, 21, 22, 23, 24])
     t3 = time.perf_counter()
 
     print("Time to setup system: ", (t2-t1))
-    print("Time to update system: ", (tu2-tu1))
     print("Time to solve system: ", (t3-t2))
 
     # Plot the displacements
-    vector_figure = femplotter.node_vector_plot(u, new_voxels)
+    vector_figure = femplotter.node_vector_plot(u, voxels)
     vector_figure.suptitle("Displacements")
-    femplotter.plot_displaced_mesh(u, new_voxels, new_figure=True)
+    femplotter.plot_displaced_mesh(u, voxels, new_figure=True)
 
     # Compute stresses and strains
-    eps = get_element_strains(u, new_voxels, L)
+    eps = get_element_strains(u, voxels, L)
     sigma = get_element_stresses(eps, E, nu)
-    n_eps = get_node_values(eps, new_voxels, L)
-    n_sigma = get_node_values(sigma, new_voxels, L)
+    n_eps = get_node_values(eps, voxels, L)
+    n_sigma = get_node_values(sigma, voxels, L)
 
     # Plot the von_mises stresses
     von_mises = von_mises_stresses_node(n_sigma)
-    von_mises_figure = femplotter.node_value_plot(von_mises, new_voxels)
+    von_mises_figure = femplotter.node_value_plot(von_mises, voxels)
     von_mises_figure.suptitle("von Mises stresses")
     plt.show()
 
