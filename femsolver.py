@@ -555,7 +555,7 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
     added = np.logical_and(new_voxels == 1, old_voxels == 0)
     removed = np.logical_and(new_voxels == 0, old_voxels == 1)
 
-    print("Added:", np.sum(added), "Removed:", np.sum(removed))
+    #print("Added:", np.sum(added), "Removed:", np.sum(removed))
 
     # Collect data for delta matrix (changes to apply)
     delta_data = []
@@ -593,7 +593,8 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
         shape=(n_dofs, n_dofs)
     )  # Convert to CSR for efficient arithmetic
 
-    print("non-zero elements in delta matrix: ", delta_matrix.nnz)
+    #print("non-zero elements in delta matrix: ", delta_matrix.nnz)
+
     # Update the global stiffness matrix
     K_new = K_old + delta_matrix
     
@@ -777,8 +778,9 @@ def solve(K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes: list, debug: b
     compt1 = time.perf_counter()
     components = n_components(K_red)
     compt2 = time.perf_counter()
-    print(components, " Components")
-    print(f"Calculating components took {compt2-compt1} seconds")
+    if debug:
+        print(components, " Components")
+        print(f"Calculating components took {compt2-compt1} seconds")
 
     pret2 = time.perf_counter()
     if debug:
@@ -826,7 +828,7 @@ class Solver:
         K_red, F_red, null_nodes = fix_null_nodes(K, F)
         self.K_red = K_red.tocsc()
         self.factor = cholesky(K_red.tocsc())
-        self.threshold = 1e-10 * np.max(np.abs(K.data))
+        self.threshold = 1e-8 * np.max(np.abs(K.data))
     
     def refactor(self, K: scipy.sparse.csr_matrix, remove_null_nodes=False):
         """
