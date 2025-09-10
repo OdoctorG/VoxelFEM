@@ -1,11 +1,14 @@
 import math
 import numpy as np
+from scipy.ndimage import label
+
 import scipy
 import matplotlib.pyplot as plt
 import scipy.sparse
 from geometry import *
 
-import femsolver, femplotter, time
+import femsolver as femsolver
+import femplotter
 
 class ForwardPass:
     
@@ -84,7 +87,8 @@ class ForwardPass:
             for voxel in force_voxels:
                 F = femsolver.add_force_to_voxel(voxel[1], voxel[0], voxels.shape[1], F, force)
         
-        u, components = femsolver.solve(K.tocsr(), F, fixed_nodes=list(fixed_nodes), debug=self.debug)
+        solver = femsolver.Solver(K.tocsr(), F)
+        u, components = solver.solve(K.tocsc(), F, np.asarray(list(fixed_nodes)), debug=self.debug)
         if u is None:
             return None, None
 
@@ -133,10 +137,14 @@ class ForwardPass:
 
     def _calc_and_plot(self, voxels, newK, F, fixed_nodes, solver: femsolver.Solver, delta: scipy.sparse.csr_matrix = None):
         von_mises, old_state = self._recalculate_stress(voxels, newK, F, fixed_nodes, solver=solver, delta=delta)
-
+        
         if von_mises is None:
             if self.debug: print("Failed to recalculate stress")
-            return None
+            return None, None
+        
+        if np.all(von_mises == 0):
+            if self.debug: print("Stress is 0!")
+            return None, None
         
         if self.PLOT:
             von_mises_figure = femplotter.fast_value_plot(old_state["von_mises"], voxels)
@@ -144,25 +152,55 @@ class ForwardPass:
             plt.show()
         
         return von_mises, old_state
+    
+    def largest_connected_component(self, grid):
+        # Define an 8-connectivity structure
+        structure = np.array([[0, 1, 0],
+                            [1, 1, 1],
+                            [0, 1, 0]])
+        
+        # Label connected components
+        labeled_grid, num_features = label(grid, structure=structure)
+        
+        if num_features == 0:
+            return np.zeros_like(grid)  # No components found
+        
+        # Count the sizes of each labeled component
+        sizes = np.bincount(labeled_grid.ravel())  # Label 0 is background
+        
+        # Ignore background (label 0) and find the largest component
+        largest_label = np.argmax(sizes[1:]) + 1  # +1 to offset ignoring background
+        print(largest_label)
+        # Create a mask for the largest component
+        largest_component = (labeled_grid == largest_label).astype(int)
+
+        new_grid = grid.copy()
+        new_grid[largest_component == 0] = 0
+        
+        return new_grid
 
     def select_voxels(self, voxels, von_mises_v, locked_indices, percentage: float = 0.5):
         # Select a subset percentage of the voxels based on the stress
         nnz = np.count_nonzero(voxels)
         sorted_indices = np.argsort(von_mises_v, axis=None)
 
+        #voxelss = self.largest_connected_component(voxels)
         flat_voxels = voxels.flatten()
-        i = 0
-        j = 0
 
-        while i < math.ceil((1-percentage)*nnz) and j < len(sorted_indices):
-            if flat_voxels[sorted_indices[j]] == 1 and sorted_indices[j] not in locked_indices:
-                i += 1
-                flat_voxels[sorted_indices[j]] = 0
-            j += 1
+        threshold = math.ceil((1 - percentage) * nnz)  
+
+        # Get mask of valid indices (nonzero and not locked)
+        valid_mask = (flat_voxels[sorted_indices] == 1) & ~np.isin(sorted_indices, locked_indices)
+
+        # Get indices of valid elements
+        valid_indices = sorted_indices[valid_mask]
+
+        # Select the first `threshold` elements and set them to 0
+        flat_voxels[valid_indices[:threshold]] = 0
 
         new_voxels = np.reshape(flat_voxels, (voxels.shape[0], voxels.shape[1]))
         return new_voxels
-    
+
     def forward_pass_A(self, steps = 3, low_limit = 0.0, high_limit = 1.0):
         # Geometry optimization based on interval bisection
 
@@ -176,22 +214,27 @@ class ForwardPass:
         Ke = femsolver.element_stiffness_matrix(E, nu, L, t)
         voxels = self.grid.getVoxels()
 
+        
         _, _, K, F, fixed_nodes = self._calculate_stress(voxels, Ke)
         threshold = 1e-8 * np.max(np.abs(K.data))
 
+        #K_red = femsolver.largest_component(K)
         K_red, F_red = femsolver.fix_boundary_nodes_fast(list(fixed_nodes), K, F)
         solver = femsolver.Solver(K_red, F_red)
+        #self.grad_test(voxels, solver)
 
         new_voxels = np.copy(voxels)
         old_voxels = new_voxels
         newK = K.copy()
+        og_voxels = new_voxels.copy()
+        og_K = K.copy()
         # Lock nodes with boundary conditions
         locked_voxels = self.grid.get_boundary_voxels(self.objects)
         locked_voxels.extend(self.grid.get_force_voxels(self.objects))
 
         
         delta = scipy.sparse.csr_matrix((K_red.shape[0], K_red.shape[1]), dtype=float)
-        delta_acc = delta
+        delta_acc = delta.copy()
 
         von_mises_v, state = self._calc_and_plot(voxels, newK, F, fixed_nodes, solver)
         old_state = state
@@ -216,43 +259,46 @@ class ForwardPass:
                 lower_limit = limit
                 limit += (upper_limit-limit)*0.5
             elif highest_stress < self.break_limit:
-                OG_VON_MISES = von_mises_v
-                old_voxels = new_voxels
                 upper_limit = limit
                 limit -= (limit-lower_limit)*0.5
                 lower_limit *= 0.9
-                K = newK
-                K_red, F_red = femsolver.fix_boundary_nodes_fast(list(fixed_nodes), K, F)
-                solver.refactor(K_red.tocsc(), True)
-                delta_acc = scipy.sparse.csr_matrix((K_red.shape[0], K_red.shape[1]), dtype=float)
-
+                og_voxels = new_voxels.copy()
+                og_K = newK.copy()
+            
+            OG_VON_MISES = von_mises_v
+            old_voxels = new_voxels
+            
+            K = newK
+            K_red, F_red = femsolver.fix_boundary_nodes_fast(list(fixed_nodes), K, F)
+            solver.refactor(K_red.tocsc(), True)
+            delta_acc = scipy.sparse.csr_matrix((K_red.shape[0], K_red.shape[1]), dtype=float)
+            
             if self.debug: 
                 print("LIMIT: ", limit)
                 print(highest_stress, " / ", self.break_limit)
             
-            new_voxels = self.select_voxels(voxels, OG_VON_MISES,locked_indices, limit)
+            new_voxels = self.select_voxels(voxels, OG_VON_MISES, locked_indices, limit)
             newK, delta = femsolver.update_global_stiffness_matrix(K, old_voxels, new_voxels, Ke, threshold)
             delta_acc += delta
-            
-            von_mises_v, state = self._recalculate_stress(new_voxels, K, F, fixed_nodes, solver=solver, delta=delta_acc)
-            old_state = state
+            #prev_u = old_state["u"]
+            von_mises_v, state = self._recalculate_stress(new_voxels, K, F, fixed_nodes, delta=delta_acc, solver=solver)
             if von_mises_v is None:
                 break
             components = state["components"]
             counter += 1
         
-        finalK, delta = femsolver.update_global_stiffness_matrix(K, old_voxels, old_voxels, Ke, threshold)
-        von_mises_v, old_state = self._calc_and_plot(old_voxels, finalK, F, fixed_nodes, solver, None)
+        finalK, delta = femsolver.update_global_stiffness_matrix(og_K, og_voxels, og_voxels, Ke, threshold)
+        von_mises_v, old_state = self._calc_and_plot(og_voxels, finalK, F, fixed_nodes, solver, None)
         sorted_indices = np.argsort(von_mises_v, axis=None)
         highest_stress = von_mises_v.flatten()[sorted_indices[-1]]
 
         if self.debug: 
             print(f"Break limit: {self.break_limit}, highest stress: {highest_stress}")
         
-        return old_voxels, old_state, lower_limit, upper_limit
+        return og_voxels, old_state, lower_limit, upper_limit
 
     def forward_pass_B(self, steps = 75, step_size = 0.01):
-        # Geometry optimization based on interval bisection
+        # Geometry optimization based on constant step size
 
         E = self.E  # Young's modulus (Pa)
         nu = self.nu   # Poisson's ratio
@@ -267,17 +313,19 @@ class ForwardPass:
         _, _, K, F, fixed_nodes = self._calculate_stress(voxels, Ke)
         threshold = 1e-8 * np.max(np.abs(K.data))
 
+        #K_red = femsolver.largest_component(K)
         K_red, F_red = femsolver.fix_boundary_nodes_fast(list(fixed_nodes), K, F)
         solver = femsolver.Solver(K_red, F_red)
+        #self.grad_test(voxels, solver)
 
         new_voxels = np.copy(voxels)
         old_voxels = new_voxels
+
         newK = K.copy()
         # Lock nodes with boundary conditions
         locked_voxels = self.grid.get_boundary_voxels(self.objects)
         locked_voxels.extend(self.grid.get_force_voxels(self.objects))
 
-        
         delta = scipy.sparse.csr_matrix((K_red.shape[0], K_red.shape[1]), dtype=float)
         delta_acc = delta.copy()
 
@@ -288,8 +336,6 @@ class ForwardPass:
         desired_n_components = state["components"]
         components = desired_n_components
 
-        desired_n_components = state["components"]
-        components = desired_n_components
         limit = 1.0
 
         while counter < steps:
@@ -299,7 +345,7 @@ class ForwardPass:
             disconnected = components != desired_n_components
             limit -= step_size
 
-            if (highest_stress > self.break_limit or disconnected):
+            if (highest_stress > self.break_limit) or disconnected:
                 if self.debug: 
                     print(f"Stress too high / disconnected: {highest_stress}")
                 break
@@ -337,4 +383,3 @@ class ForwardPass:
             print(f"Break limit: {self.break_limit}, highest stress: {highest_stress}")
         
         return old_voxels, old_state
-

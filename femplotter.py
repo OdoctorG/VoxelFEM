@@ -1,12 +1,11 @@
 """ Plotting functions for displaying the results of the FEM solver """
 
-import math
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.cm as cm
 from matplotlib.colors import Normalize
-from femsolver import nodes_to_coord, coord_to_nodes, shape_function
+from femsolver_cont import nodes_to_coord, coord_to_nodes, shape_function
 
 import matplotlib.style as mplstyle
 mplstyle.use('fast')
@@ -40,7 +39,7 @@ def plot_mesh(voxels: np.ndarray, new_figure: bool = False, offset: np.ndarray =
         fig = plt.figure()
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
-            if voxels[i, j] == 1:
+            if voxels[i, j] > 0:
                 for k in [[0,1,0,0],[0,0,0,1],[1,1,0,1],[0,1,1,1]]:
                     if flip_y:
                         plt.plot([j+k[0]+offset[0], j+k[1]+offset[0]], [-i+k[2]+offset[1], -i+k[3]+offset[1]], color=color, zorder=z_order, alpha=opacity)
@@ -89,7 +88,7 @@ def plot_displaced_mesh(u: np.ndarray, voxels: np.ndarray, scale: float = 10e9, 
         fig = plt.figure()
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
-            if voxels[i, j] == 1:
+            if voxels[i, j] > 0:
                 nodes = coord_to_nodes(i, j, voxels.shape[1])
                 node_displacements = []
                 for node in nodes:
@@ -176,13 +175,13 @@ def node_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
     """
 
     fig = plt.figure()
-    norm = plt.Normalize(0.9*min(vals), max(vals)*4)
+    norm = plt.Normalize(0.9*min(vals), max(vals)*1.1)
     # Vectorize the function
     vectorized_compute_vector = np.vectorize(shape_function, signature='(),()->(n)')
 
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
-            if (voxels[i, j] == 1):
+            if (voxels[i, j] > 0):
                 coord = coord_to_nodes(i, j, voxels.shape[1])
                 z = [vals[coord[0]], vals[coord[1]], vals[coord[2]], vals[coord[3]]]
                 x = np.linspace(-1, 1, 10)
@@ -207,14 +206,12 @@ def node_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
 def fast_value_plot(vals: np.ndarray, voxels: np.ndarray) -> plt.Figure:
     
     fig = plt.figure()
-    norm = plt.Normalize(0.9*min(vals), max(vals)*4)
     
     # Vectorize the function
-    vectorized_compute_vector = np.vectorize(shape_function, signature='(),()->(n)')
     image = np.zeros((voxels.shape[0], voxels.shape[1]))
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
-            if (voxels[i, j] == 1):
+            if (voxels[i, j] > 0):
                 coord = coord_to_nodes(i, j, voxels.shape[1])
                 z = vals[coord[0]] + vals[coord[1]] + vals[coord[2]] + vals[coord[3]]
                 z *= 0.25

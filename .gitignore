@@ -1,0 +1,5 @@
+setup.ps1
+test.py
+.vscode/
+__pycache__/
+env/

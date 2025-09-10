@@ -1,4 +1,9 @@
 """ 
+This is a version of the voxel FEM solver that supports continuous voxel densities between 0 and 1.
+The file is very similar to femsolver.py, but with some modifications to support continuous densities.
+
+--------------------------------------------------------------
+
 Voxel 2D FEM Solver 
 
 Uses square elements with four nodes and bilinear form functions.
@@ -16,14 +21,12 @@ N₄ = (1 + ξ)(1 + η) / 4
 
 """
 
-import math
 import numpy as np
-#import autograd.numpy as np
-from autograd.extend import primitive, defvjp
 import scipy.signal
 import scipy.sparse
 import scipy.sparse.linalg
 import time
+import warnings
 
 import os
 os.add_dll_directory("C://Users/greno/miniforge3/Library/bin")
@@ -50,8 +53,8 @@ def B_matrix(xi, eta, L):
     return B
 
 
-def shape_function(xi: float, eta: float) -> float:
-    N = 0.25*np.array([(1 - xi)*(1 - eta), (1 + xi)*(1 - eta), (1 - xi)*(1 + eta), (1 + xi)*(1 + eta)])
+def shape_function(xi: float, eta: float) -> np.ndarray:
+    N = 0.25 * np.array([(1 - xi)*(1 - eta), (1 + xi)*(1 - eta), (1 - xi)*(1 + eta), (1 + xi)*(1 + eta)])
 
     return N
 
@@ -67,7 +70,11 @@ def gauss_points(N: int) -> tuple[list, list]:
     Returns
     -------
     tuple[list, list]
-        A tuple with the Gauss points and weights. If N is not in the range 1-4, returns None, None.
+        A tuple with the Gauss points and weights. 
+    
+    Notes
+    -----
+    If N is not in the range 1-4 it will raise a ValueError.
     """
 
     if N == 1:
@@ -78,7 +85,8 @@ def gauss_points(N: int) -> tuple[list, list]:
         return ([-np.sqrt(3/5), 0, np.sqrt(3/5)], [5/9, 8/9, 5/9])
     if N == 4:
         return ([0.339981633, -0.339981633, 0.861136311, -0.861136311], [0.652145, 0.652145, 0.347855, 0.347855])
-    return (None, None)
+    
+    raise ValueError("NGAUSS must be in the range 1-4")
 
 def element_stiffness_matrix(E: float, nu: float, L, t) -> np.ndarray:
     """
@@ -145,7 +153,7 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
     np.ndarray
         Strains at each element.
     """
-    H = voxels.shape[0] # Number of rows
+    #H = voxels.shape[0] # Number of rows
     W = voxels.shape[1] # Number of columns
 
     # Gauss points and weights
@@ -156,7 +164,7 @@ def get_element_strains(u: np.ndarray, voxels: np.ndarray, L: float) -> np.ndarr
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
 
-            if voxels[i, j] == 1:
+            if voxels[i, j] > 0:
                 # Convert voxel coordinates to node indices
                 nodes = coord_to_nodes(i, j, W)
                 # Get nodal displacements
@@ -219,7 +227,7 @@ def get_element_strains_fast(u: np.ndarray, voxels: np.ndarray, L: float) -> np.
         B_scaled[gp_idx] = B * (w[xi_idx] * w[eta_idx] * 0.25)  # Include weights and J
 
     # Get solid element indices
-    solid_i, solid_j = np.where(voxels == 1)
+    solid_i, solid_j = np.where(voxels > 0)
     n_solid = len(solid_i)
     if n_solid == 0:
         return np.zeros((H*n_g, W*n_g, 3))
@@ -240,8 +248,6 @@ def get_element_strains_fast(u: np.ndarray, voxels: np.ndarray, L: float) -> np.
         eta_idx, xi_idx = divmod(gp_idx, n_g)  # xi varies faster in original loop
         rows = solid_i * n_g + eta_idx
         cols = solid_j * n_g + xi_idx
-        # Create indices
-        indices = (rows, cols)
 
         # Use np.array instead of modifying in-place
         strains[rows, cols, :] = strains_all[:, gp_idx, :]
@@ -278,7 +284,7 @@ def get_node_values(element_s: np.ndarray, voxels: np.ndarray, L: float) -> np.n
 
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
-            if voxels[i, j] == 1:
+            if voxels[i, j] > 0:
                 nodes = coord_to_nodes(i,j, W)
                 # Loop over all Gauss points
                 xi_idx = 0
@@ -321,7 +327,7 @@ def get_node_values_fast(element_s: np.ndarray, voxels: np.ndarray, L: float) ->
     # Now element_s_4d[i,j] is (n_gauss_xi, n_gauss_eta, 3)
 
     # Get indices of solid elements
-    solid_i, solid_j = np.where(voxels == 1)
+    solid_i, solid_j = np.where(voxels > 0)
     num_solid = len(solid_i)
     if num_solid == 0:
         return np.zeros(((H + 1) * (W + 1), 3))
@@ -350,8 +356,7 @@ def get_node_values_fast(element_s: np.ndarray, voxels: np.ndarray, L: float) ->
                 np.add.at(strains[:, l], node_indices, weights * all_strains[:, l])
             else:
                 # Autograd.numpy does not support np.add.at
-                # this is a custom implementation
-                strains[:, l] = add_at(strains[:, l], node_indices, weights * all_strains[:, l])
+                raise NotImplementedError("get_node_values_fast does not support autograd.numpy currently.")
 
 
     return strains
@@ -362,7 +367,7 @@ def get_voxel_values(node_values, voxels):
     voxel_values = np.zeros((voxels.shape[0], voxels.shape[1]))
     for i in range(voxels.shape[0]):
         for j in range(voxels.shape[1]):
-            if voxels[i, j] == 1:
+            if voxels[i, j] > 0:
                 nodes = coord_to_nodes(i, j, voxels.shape[1])
                 mean = 0
                 vals = [node_values[n] for n in nodes]
@@ -376,7 +381,7 @@ def get_voxel_values_fast(node_values, voxels):
     # Width
     W = voxels.shape[1]
     # Get indices of solid elements
-    solid_i, solid_j = np.where(voxels == 1)
+    solid_i, solid_j = np.where(voxels > 0)
     nodes = coord_to_nodes_vectorized(solid_i, solid_j, W)
 
     voxel_values = np.zeros((voxels.shape[0], voxels.shape[1]))
@@ -516,7 +521,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
     width = voxels.shape[1]
 
     # Estimate number of non-zero entries
-    nnz = np.sum(voxels == 1) * 64  # Each voxel contributes 8x8 stiffness entries
+    nnz = np.sum(voxels > 0) * 64  # Each voxel contributes 8x8 stiffness entries
 
     # Initialize sparse matrix storage
     data = np.zeros(nnz, dtype=float)
@@ -524,7 +529,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
     col_indices = np.zeros(nnz, dtype=int)
 
     # Get the indices of the solid voxels
-    solid_voxel_indices = np.argwhere(voxels == 1)
+    solid_voxel_indices = np.argwhere(voxels > 0)
 
     idx = 0
     for i, j in solid_voxel_indices:
@@ -534,7 +539,7 @@ def global_stiffness_matrix(Ke: np.ndarray, voxels: np.ndarray) -> scipy.sparse.
             global_i = my_nodes[local_i // 2] * 2 + local_i % 2
             for local_j in range(8):
                 global_j = my_nodes[local_j // 2] * 2 + local_j % 2
-                data[idx] = Ke[local_i, local_j]
+                data[idx] = Ke[local_i, local_j]*voxels[i, j] # Scale by voxel density
                 row_indices[idx] = global_i
                 col_indices[idx] = global_j
                 idx += 1
@@ -569,8 +574,8 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
     width = new_voxels.shape[1]
 
     # Determine which voxels have been added or removed
-    added = np.logical_and(new_voxels == 1, old_voxels == 0)
-    removed = np.logical_and(new_voxels == 0, old_voxels == 1)
+    added = np.logical_and(new_voxels > 0, old_voxels >= 0)
+    removed = np.logical_and(new_voxels == 0, old_voxels > 0)
 
     #print("Added:", np.sum(added), "Removed:", np.sum(removed))
 
@@ -579,7 +584,7 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
     delta_rows = []
     delta_cols = []
 
-    # Process added voxels: add their Ke contributions
+    # Process added/modified voxels: add their Ke contributions
     added_indices = np.argwhere(added)
     for i, j in added_indices:
         nodes = coord_to_nodes(i, j, width)
@@ -587,7 +592,7 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
             global_i = nodes[local_i // 2] * 2 + (local_i % 2)
             for local_j in range(8):
                 global_j = nodes[local_j // 2] * 2 + (local_j % 2)
-                delta_data.append(Ke[local_i, local_j])
+                delta_data.append(Ke[local_i, local_j]*(new_voxels[i, j]-old_voxels[i, j]))  # Scale by new voxel density
                 delta_rows.append(global_i)
                 delta_cols.append(global_j)
 
@@ -599,7 +604,7 @@ def update_global_stiffness_matrix(K_old: scipy.sparse.csr_matrix, old_voxels: n
             global_i = nodes[local_i // 2] * 2 + (local_i % 2)
             for local_j in range(8):
                 global_j = nodes[local_j // 2] * 2 + (local_j % 2)
-                delta_data.append(-Ke[local_i, local_j])
+                delta_data.append(-Ke[local_i, local_j]*old_voxels[i, j])  # Scale by old voxel density
                 delta_rows.append(global_i)
                 delta_cols.append(global_j)
 
@@ -683,7 +688,7 @@ def add_force_to_nodes(node_indices, F: np.ndarray, force: np.ndarray) -> np.nda
     
     return F
 
-def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray]:
+def fix_boundary_nodes(node_indices, K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_array, np.ndarray]:
     # Apply boundary conditions to K and F - Fairly fast implementation (help from ChatGPT)
 
     # Degrees of freedom indices
@@ -761,13 +766,13 @@ def fix_null_nodes(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.spa
 
     return K, F, np.where(null_nodes)[0]
 
-def n_components(matrix: scipy.sparse.csr_matrix) -> tuple[int, scipy.sparse.csr_matrix]:
+def n_components(matrix: scipy.sparse.csr_matrix) -> int:
     # Number of components in the graph rep. of matrix
     n_components, components = scipy.sparse.csgraph.connected_components(matrix)  # Find connected components
     
     return n_components  # If only one component, graph is connected
 
-def largest_component(K: scipy.sparse.csr_matrix, F: np.ndarray) -> scipy.sparse.csr_matrix:
+def largest_component(K: scipy.sparse.csr_matrix, F: np.ndarray) -> tuple[scipy.sparse.csr_matrix, np.ndarray]:
     n_components, components = scipy.sparse.csgraph.connected_components(K)  # Find connected components
     f_mask = (np.abs(F) > 10e-6).squeeze()
     mask = (components <= 3)
@@ -840,8 +845,6 @@ def get_B_matrix(F: np.ndarray) -> np.ndarray:
 
     return B
 
-import warnings
-
 class Solver:
     factor = None
 
@@ -871,10 +874,10 @@ class Solver:
         self.K_red = K.tocsc()
         try:
             self.factor = cholesky(K.tocsc(), ordering_method = "colamd")
-        except Exception as e:
+        except Exception:
             self.factor = None
 
-    def solve(self, K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes, debug: bool = False) -> np.ndarray:
+    def solve(self, K: scipy.sparse.csr_matrix, F: np.ndarray, fixed_nodes, debug: bool = False) -> tuple[np.ndarray, int]:
         """
         Solve the linear system K @ u = F, subject to displacement boundary conditions.
 
@@ -1009,7 +1012,15 @@ def test():
                     [1,1]])
     
     # Subdivide
-    voxels = sub_divide(voxels, 2)
+    voxels = sub_divide(voxels, 2)*0.5
+    noise = np.random.rand(voxels.shape[0], voxels.shape[1])*0.1
+    voxels = np.clip(voxels + noise*voxels, 0, 1)
+
+    # Plot density
+    plt.figure()
+    plt.imshow(voxels, cmap='gray', origin='upper')
+    plt.title("Voxel density")
+    plt.colorbar(label='Density')
 
     # Compute the global stiffness matrix
     K = global_stiffness_matrix(Ke, voxels)

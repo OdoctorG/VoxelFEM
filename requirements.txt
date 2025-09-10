@@ -1,0 +1,6 @@
+numpy
+scipy
+cython
+autograd
+scikit-sparse
+matplotlib
