@@ -5,7 +5,43 @@ Includes two objectives:
 1. Minimize sum of squared differences between von Mises stresses and fully stressed state
 2. Minimize the difference between the maximum von Mises stresses and the breaking stress
 
-Also includes an optional regularization term for both objectives.
+Also includes:
+- Optional regularization term for both objectives
+- Discrete penalty to promote binary (0 or 1) density solutions
+
+## Discrete Penalty for Binary Solutions
+
+To encourage the optimizer to produce discrete (0 or 1) density maps instead of 
+continuous values, use the `obj_1_discrete` and `obj_1_discrete_grad` functions
+with a non-zero `discrete_weight` parameter.
+
+The discrete penalty is: weight * sum[C_i * (1 - C_i)]
+
+This penalty is:
+- Zero at C=0 or C=1 (discrete values)
+- Maximum at C=0.5 (intermediate values)
+- Has gradient that pushes C<0.5 toward 0 and C>0.5 toward 1
+
+Recommended usage:
+1. Start optimization with discrete_weight=0 to find a good initial solution
+2. Gradually increase discrete_weight (e.g., 1e8, 1e9, 1e10) to push toward discrete solution
+3. Higher weights promote stronger discretization but may cause instability
+
+Example:
+    discrete_weight = 1e9  # Adjust based on problem scale
+    obj_val = gradient.obj_1_discrete(von_mises, voxels, B, lambda_, discrete_weight)
+    grad = gradient.obj_1_discrete_grad(u, B, K, Ke, stresses, von_mises, voxels, 
+                                        lambda_, fixed_nodes, discrete_weight)
+
+## Known Issues
+
+The gradient computation uses an adjoint method that approximates the derivative of 
+max(von_mises) using mean(von_mises). This introduces approximately 50% error in the
+gradient, but the optimization still converges as the gradient direction is mostly correct.
+
+Fixes applied:
+- Fixed tau_xy gradient component (was using constant 3 instead of 6*tau_xy)
+- Updated finite difference test to properly recompute FEM solution
 """
 
 import femsolver_cont as femsolver
