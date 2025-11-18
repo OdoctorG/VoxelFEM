@@ -29,7 +29,11 @@ import time
 import warnings
 
 import os
-os.add_dll_directory("C://Users/greno/miniforge3/Library/bin")
+import sys
+# os.add_dll_directory("C://Users/greno/miniforge3/Library/bin")  # Windows-specific path, commented out
+if sys.platform == 'win32':
+    # On Windows, you may need to add DLL directory
+    pass
 from sksparse.cholmod import cholesky
 
 # Number of Gauss points, if set to 1 you get very bad results. 2 and up recommended
@@ -385,8 +389,7 @@ def get_voxel_values_fast(node_values, voxels):
     nodes = coord_to_nodes_vectorized(solid_i, solid_j, W)
 
     voxel_values = np.zeros((voxels.shape[0], voxels.shape[1]))
-    voxel_values[solid_i, solid_j] = np.max(node_values[nodes], axis=1) # Use max
-    # voxel_values[solid_i, solid_j] = np.mean(node_vals, axis=1)  # Use mean
+    voxel_values[solid_i, solid_j] = np.max(node_values[nodes], axis=1)  # Use max
 
     return voxel_values
 
