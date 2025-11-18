@@ -29,7 +29,11 @@ import time
 import warnings
 
 import os
-os.add_dll_directory("C://Users/greno/miniforge3/Library/bin")
+import sys
+# os.add_dll_directory("C://Users/greno/miniforge3/Library/bin")  # Windows-specific path, commented out
+if sys.platform == 'win32':
+    # On Windows, you may need to add DLL directory
+    pass
 from sksparse.cholmod import cholesky
 
 # Number of Gauss points, if set to 1 you get very bad results. 2 and up recommended
